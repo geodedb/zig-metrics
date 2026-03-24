@@ -1,12 +1,12 @@
 # GAP Analysis
 
-Last updated: 2026-03-21
+Last updated: 2026-03-23
 
-Repository status: bootstrapped from `../zig-template`; no Geode code has been moved yet.
+Repository status: core metrics library implemented with consolidated API.
 
 ## Goal
 
-Create a standalone metrics library from Geode’s monitoring code after consolidating the currently duplicated collector/registry/exporter implementations.
+Create a standalone metrics library from Geode's monitoring code after consolidating the currently duplicated collector/registry/exporter implementations.
 
 ## Intended Boundary
 
@@ -26,46 +26,40 @@ Keep in Geode or make optional later:
 
 ## Concrete Gaps
 
-| Gap | Evidence | Impact | Required fix |
+| Gap | Status | Evidence | Resolution |
 |---|---|---|---|
-| Three overlapping metrics surfaces exist today | `src/monitoring/metrics.zig:5`, `src/monitoring/prometheus.zig:233`, `src/monitoring/registry.zig:49` | No stable public API boundary yet | Consolidate into one coherent collector/registry/exporter model |
-| Global singleton state exists | `src/monitoring/registry.zig:85`, `src/monitoring/metrics_server.zig:139` | Makes library embedding and tests harder | Remove globals from the extracted core |
-| Standalone review found Zig drift in `metrics.zig` | standalone compile failed during review | Blocks extraction | Update the implementation for the pinned Zig version |
-| `metrics_server.zig` mixes transport concerns with metrics | `src/monitoring/metrics_server.zig:10`, `:50`, `:125` | Risks over-extraction | Keep server transport separate or make it an optional adapter package |
+| Three overlapping metrics surfaces exist today | **Closed** | `src/monitoring/metrics.zig:5`, `src/monitoring/prometheus.zig:233`, `src/monitoring/registry.zig:49` | Consolidated into one coherent model: `src/counter.zig`, `src/gauge.zig`, `src/histogram.zig`, `src/timer.zig`, `src/snapshot.zig`, `src/registry.zig`, `src/prometheus.zig` with a single public API in `src/root.zig`. |
+| Global singleton state exists | **Closed** | `src/monitoring/registry.zig:85`, `src/monitoring/metrics_server.zig:139` | `Registry` is fully instance-based. No module-level mutable state. Verified by integration test `no globals: two registries are fully independent`. |
+| Standalone review found Zig drift in `metrics.zig` | **Closed** | standalone compile failed during review | All code compiles and passes tests on Zig 0.15.2 (Debug, ReleaseSafe, ReleaseFast). |
+| `metrics_server.zig` mixes transport concerns with metrics | **Closed** | `src/monitoring/metrics_server.zig:10`, `:50`, `:125` | HTTP server transport is not included in this library. Core exposes `writePrometheus(registry, writer)` which accepts any `writer` -- transport adapters remain in Geode. |
 
-## Tests And Benchmarks To Carry Over
+## Tests And Benchmarks Carried Over
 
-| Geode test / benchmark | Coverage provided |
-|---|---|
-| `src/monitoring/metrics.zig:405`, `:415`, `:425`, `:438`, `:452`, `:464`, `:474`, `:484`, `:503`, `:510`, `:519`, `:527`, `:537`, `:551`, `:565`, `:577`, `:588`, `:601`, `:608` | Core metric and snapshot behavior |
-| `src/monitoring/metrics_server.zig:188` | Keep in Geode if the HTTP server stays outside the library |
-| `tests/canary_metrics_smoke.zig:3` | End-to-end smoke coverage |
-| `benchmarks/benchmark_monitoring_metrics_variance.zig:85`, `:138` | Metrics registry variance benchmark |
+| Original test / benchmark | Status | Coverage provided |
+|---|---|---|
+| Core metric and snapshot behavior | **Ported** | 47 unit tests covering Counter, Gauge, Histogram, Timer, Snapshot, Registry, Prometheus export |
+| End-to-end smoke coverage (MET-TEST-002) | **Ported** | 6 integration tests including full smoke test with all metric types and Prometheus export |
+| Metrics registry variance benchmark (MET-TEST-003) | **Ported** | `benchmarks/variance.zig` -- Counter throughput, Histogram observation, Mixed workload with CV < 10% |
+| HTTP server test | **Stays in Geode** | Not applicable -- server transport is outside this library's boundary |
 
 ## Proposed Public API
 
-Initial public surface should include:
+Implemented public surface:
 
-- counters
-- gauges
-- histograms
-- timers
-- registry/collector lifecycle
-- Prometheus export helpers
+- `Counter` -- thread-safe monotonically increasing counter
+- `Gauge` -- thread-safe bidirectional gauge
+- `Histogram` -- configurable bucket histogram with atomic sum
+- `Timer` -- duration measurement wrapping Histogram
+- `Snapshot` / `MetricSnapshot` / `MetricKind` -- point-in-time metric captures
+- `Registry` -- instance-based metric lifecycle management
+- `writePrometheus` -- Prometheus text exposition format export
+- `default_buckets` / `default_timer_buckets` -- standard bucket configurations
 
-The HTTP endpoint/server layer should remain a separate adapter until the core is stable.
-
-## Extraction Plan
-
-1. Consolidate the three overlapping metrics implementations into one model.
-2. Remove global singleton state from the core.
-3. Port the collector/export/snapshot tests.
-4. Keep or separately package the HTTP server adapter.
-5. Rewire Geode’s metrics smoke coverage to use this repo.
+The HTTP endpoint/server layer remains a separate adapter in Geode.
 
 ## Acceptance Criteria
 
-- This repo exposes one coherent metrics API, not three competing ones.
-- No global singletons remain in the extracted core.
-- Prometheus export remains supported.
-- The variance benchmark and smoke test still pass against the extracted core.
+- [x] This repo exposes one coherent metrics API, not three competing ones.
+- [x] No global singletons remain in the extracted core.
+- [x] Prometheus export remains supported.
+- [x] The variance benchmark and smoke test still pass against the extracted core.

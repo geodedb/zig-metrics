@@ -6,11 +6,9 @@ A Zig library for metrics
 
 ## Table of Contents
 
-- [Getting Started](getting-started.md)
-- [API Reference](api-reference.md)
-- [Examples](examples.md)
-- [Architecture](architecture.md)
-- [FAQ](faq.md)
+- [Requirements](REQUIREMENTS.md)
+- [Gap Analysis](GAP_ANALYSIS.md)
+- [Resolved Gaps](GAP_ANALYSIS_RESOLVED.md)
 
 ## Quick Links
 

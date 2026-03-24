@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2024-2025 CodePros
 
-.PHONY: all build test test-unit test-integration clean check fmt help dev ci
+.PHONY: all build test test-unit test-integration clean check fmt help dev ci bench
 .PHONY: test-release-safe test-release-fast test-release-small test-all-optimizations
 .PHONY: pre-commit-install pre-commit pre-commit-run
 
@@ -39,10 +39,15 @@ check:
 	@echo "🔍 Checking for compilation errors..."
 	@zig build check
 
+# Run variance benchmark
+bench:
+	@echo "Running variance benchmark..."
+	@zig build bench -Doptimize=ReleaseFast
+
 # Format source code
 fmt:
 	@echo "📝 Formatting code..."
-	@zig fmt src/ tests/ build.zig
+	@zig fmt src/ tests/ benchmarks/ build.zig
 
 # Quick development iteration loop
 dev: fmt check test-unit

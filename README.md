@@ -9,7 +9,7 @@ A Zig library for metrics
 
 - **Zero Dependencies**: Pure Zig standard library only
 - **Memory Safe**: Proper allocation patterns with no leaks
-- **Cross-Platform**: Linux, macOS, Windows support
+- **Cross-Platform**: Linux, macOS support (Windows cross-compiles but is not CI-validated)
 - **Well Tested**: Comprehensive unit and integration tests
 
 ## Installation
@@ -44,9 +44,29 @@ const std = @import("std");
 const metrics = @import("metrics");
 
 pub fn main() !void {
-    try metrics.init(.{
-        .debug = true,
-    });
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Create an instance-based registry (no globals)
+    var reg = metrics.Registry.init(allocator);
+    defer reg.deinit();
+
+    // Register and use metrics
+    const requests = try reg.counter("http_requests_total", "Total HTTP requests");
+    requests.inc();
+
+    const connections = try reg.gauge("active_connections", "Active connections");
+    connections.set(42);
+
+    const buckets = [_]f64{ 0.01, 0.05, 0.1, 0.5, 1.0, 5.0 };
+    const latency = try reg.histogram("request_latency_seconds", "Latency", &buckets);
+    latency.observe(0.03);
+
+    // Export to Prometheus text format
+    var buf: [8192]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    try metrics.writePrometheus(&reg, fbs.writer());
 }
 ```
 
