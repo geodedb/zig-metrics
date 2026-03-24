@@ -9,8 +9,8 @@ include:
   - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.7.1
   - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.7.1
 
-  # Code quality
-  - component: gitlab.com/devnw/ci-catalog/zig-format@v1.2.1
+  # NOTE: zig-format@v1.2.1 uses old URL naming (zig-linux-x86_64), incompatible
+  # with Zig 0.15+. Format checking is done inline in the zig-format job below.
 
   # SBOM
   - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.7.1
@@ -38,6 +38,15 @@ stages:
   - tar -xf zig.tar.xz
   - export PATH="$PWD/zig-x86_64-linux-${ZIG_VERSION}:$PATH"
   - zig version
+
+# Format check (replaces zig-format CI catalog component for 0.15+ compat)
+zig-format:
+  stage: test
+  image: debian:bookworm-slim
+  before_script:
+    - *install-zig
+  script:
+    - zig fmt --check src/ tests/ benchmarks/ build.zig
 
 # Build job
 build:
