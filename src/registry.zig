@@ -8,6 +8,7 @@
 //! Thread-safe for concurrent registration and collection.
 
 const std = @import("std");
+const spice = @import("spice");
 const Counter = @import("counter.zig").Counter;
 const Gauge = @import("gauge.zig").Gauge;
 const Histogram = @import("histogram.zig").Histogram;
@@ -43,7 +44,7 @@ pub const Registry = struct {
     gauges: std.StringHashMap(*Gauge),
     histograms: std.StringHashMap(*Histogram),
     timers: std.StringHashMap(*Timer),
-    mutex: std.Thread.Mutex,
+    rwlock: std.Thread.RwLock,
 
     /// Create a new empty registry.
     pub fn init(allocator: std.mem.Allocator) Registry {
@@ -53,14 +54,14 @@ pub const Registry = struct {
             .gauges = std.StringHashMap(*Gauge).init(allocator),
             .histograms = std.StringHashMap(*Histogram).init(allocator),
             .timers = std.StringHashMap(*Timer).init(allocator),
-            .mutex = .{},
+            .rwlock = .{},
         };
     }
 
     /// Destroy the registry and free all owned metrics.
     pub fn deinit(self: *Registry) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lock();
+        defer self.rwlock.unlock();
 
         var counter_iter = self.counters.valueIterator();
         while (counter_iter.next()) |c| {
@@ -129,8 +130,8 @@ pub const Registry = struct {
         try validateName(name);
         try validateHelp(help);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lock();
+        defer self.rwlock.unlock();
 
         if (self.nameInUse(name)) return error.AlreadyRegistered;
 
@@ -149,8 +150,8 @@ pub const Registry = struct {
         try validateName(name);
         try validateHelp(help);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lock();
+        defer self.rwlock.unlock();
 
         if (self.nameInUse(name)) return error.AlreadyRegistered;
 
@@ -173,8 +174,8 @@ pub const Registry = struct {
         try validateName(name);
         try validateHelp(help);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lock();
+        defer self.rwlock.unlock();
 
         if (self.nameInUse(name)) return error.AlreadyRegistered;
 
@@ -206,8 +207,8 @@ pub const Registry = struct {
         try validateName(name);
         try validateHelp(help);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lock();
+        defer self.rwlock.unlock();
 
         if (self.nameInUse(name)) return error.AlreadyRegistered;
 
@@ -230,37 +231,40 @@ pub const Registry = struct {
     }
 
     /// Look up a counter by name. Returns null if not found.
+    /// Uses a shared (read) lock -- concurrent lookups do not block each other.
     pub fn getCounter(self: *Registry, name: []const u8) ?*Counter {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lockShared();
+        defer self.rwlock.unlockShared();
         return self.counters.get(name);
     }
 
     /// Look up a gauge by name. Returns null if not found.
     pub fn getGauge(self: *Registry, name: []const u8) ?*Gauge {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lockShared();
+        defer self.rwlock.unlockShared();
         return self.gauges.get(name);
     }
 
     /// Look up a histogram by name. Returns null if not found.
     pub fn getHistogram(self: *Registry, name: []const u8) ?*Histogram {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lockShared();
+        defer self.rwlock.unlockShared();
         return self.histograms.get(name);
     }
 
     /// Look up a timer by name. Returns null if not found.
     pub fn getTimer(self: *Registry, name: []const u8) ?*Timer {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lockShared();
+        defer self.rwlock.unlockShared();
         return self.timers.get(name);
     }
 
     /// Capture a point-in-time snapshot of all metrics.
+    /// Uses a shared (read) lock -- concurrent snapshots and lookups
+    /// do not block each other or metric updates (which are lock-free).
     pub fn snapshot(self: *Registry) error{OutOfMemory}!Snapshot {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lockShared();
+        defer self.rwlock.unlockShared();
         return snapshot_mod.captureSnapshot(
             self.allocator,
             &self.counters,
@@ -270,10 +274,252 @@ pub const Registry = struct {
         );
     }
 
+    /// Capture a snapshot using spice fork/join to fan-out capture across
+    /// the four metric types concurrently. Each metric type is captured
+    /// on a separate worker thread when workers are available.
+    ///
+    /// Requires an active spice ThreadPool with background workers started.
+    pub fn parallelSnapshot(self: *Registry, pool: *spice.ThreadPool) error{OutOfMemory}!Snapshot {
+        self.rwlock.lockShared();
+        defer self.rwlock.unlockShared();
+
+        // Pre-calculate sizes (sequential -- needed before allocation)
+        const counter_count = self.counters.count();
+        const gauge_count = self.gauges.count();
+        const hist_count = self.histograms.count();
+        const timer_count = self.timers.count();
+        const total = counter_count + gauge_count + hist_count + timer_count;
+
+        var hist_bucket_total: usize = 0;
+        var hist_iter_pre = self.histograms.valueIterator();
+        while (hist_iter_pre.next()) |h| {
+            hist_bucket_total += h.*.buckets.len;
+        }
+        var timer_bucket_total: usize = 0;
+        var timer_iter_pre = self.timers.valueIterator();
+        while (timer_iter_pre.next()) |t| {
+            timer_bucket_total += t.*.histogram.buckets.len;
+        }
+        const bucket_total = hist_bucket_total + timer_bucket_total;
+
+        // Allocate storage
+        const entries = self.allocator.alloc(snapshot_mod.MetricSnapshot, total) catch return error.OutOfMemory;
+        errdefer self.allocator.free(entries);
+        const bucket_count_storage = self.allocator.alloc(u64, bucket_total) catch return error.OutOfMemory;
+        errdefer self.allocator.free(bucket_count_storage);
+        const bucket_bound_storage = self.allocator.alloc(f64, bucket_total) catch return error.OutOfMemory;
+        errdefer self.allocator.free(bucket_bound_storage);
+
+        // Slice ranges for each metric type
+        const counter_entries = entries[0..counter_count];
+        const gauge_entries = entries[counter_count .. counter_count + gauge_count];
+        const hist_entries = entries[counter_count + gauge_count .. counter_count + gauge_count + hist_count];
+        const timer_entries = entries[counter_count + gauge_count + hist_count .. total];
+        const hist_bucket_counts = bucket_count_storage[0..hist_bucket_total];
+        const hist_bucket_bounds = bucket_bound_storage[0..hist_bucket_total];
+        const timer_bucket_counts = bucket_count_storage[hist_bucket_total..bucket_total];
+        const timer_bucket_bounds = bucket_bound_storage[hist_bucket_total..bucket_total];
+
+        // Fan-out capture across 4 metric types using spice fork/join.
+        // Counters run on the calling thread; gauges, histograms, timers are forked.
+        const CaptureArgs = struct {
+            reg: *Registry,
+            counter_entries: []snapshot_mod.MetricSnapshot,
+            gauge_entries: []snapshot_mod.MetricSnapshot,
+            hist_entries: []snapshot_mod.MetricSnapshot,
+            timer_entries: []snapshot_mod.MetricSnapshot,
+            hist_bucket_counts: []u64,
+            hist_bucket_bounds: []f64,
+            timer_bucket_counts: []u64,
+            timer_bucket_bounds: []f64,
+        };
+
+        pool.call(void, struct {
+            pub fn run(t: *spice.Task, args: CaptureArgs) void {
+                const GaugeInput = struct {
+                    gauges: *std.StringHashMap(*Gauge),
+                    out: []snapshot_mod.MetricSnapshot,
+                };
+                const HistInput = struct {
+                    histograms: *std.StringHashMap(*Histogram),
+                    out: []snapshot_mod.MetricSnapshot,
+                    counts: []u64,
+                    bounds: []f64,
+                };
+                const TimerInput = struct {
+                    timers: *std.StringHashMap(*Timer),
+                    out: []snapshot_mod.MetricSnapshot,
+                    counts: []u64,
+                    bounds: []f64,
+                };
+
+                // Fork gauges
+                var gauge_fut = spice.Future(GaugeInput, void).init();
+                gauge_fut.fork(t, struct {
+                    pub fn capture(t2: *spice.Task, input: GaugeInput) void {
+                        _ = t2;
+                        var iter = input.gauges.iterator();
+                        var idx: usize = 0;
+                        while (iter.next()) |entry| {
+                            const g = entry.value_ptr.*;
+                            input.out[idx] = .{
+                                .name = g.name,
+                                .help = g.help,
+                                .kind = .gauge,
+                                .gauge_value = g.get(),
+                            };
+                            idx += 1;
+                        }
+                    }
+                }.capture, .{ .gauges = &args.reg.gauges, .out = args.gauge_entries });
+
+                // Fork histograms
+                var hist_fut = spice.Future(HistInput, void).init();
+                hist_fut.fork(t, struct {
+                    pub fn capture(t2: *spice.Task, input: HistInput) void {
+                        _ = t2;
+                        captureHistType(input.histograms, input.out, input.counts, input.bounds, .histogram);
+                    }
+                }.capture, .{ .histograms = &args.reg.histograms, .out = args.hist_entries, .counts = args.hist_bucket_counts, .bounds = args.hist_bucket_bounds });
+
+                // Fork timers
+                var timer_fut = spice.Future(TimerInput, void).init();
+                timer_fut.fork(t, struct {
+                    pub fn capture(t2: *spice.Task, input: TimerInput) void {
+                        _ = t2;
+                        captureTimerType(input.timers, input.out, input.counts, input.bounds);
+                    }
+                }.capture, .{ .timers = &args.reg.timers, .out = args.timer_entries, .counts = args.timer_bucket_counts, .bounds = args.timer_bucket_bounds });
+
+                // Capture counters on calling thread
+                {
+                    var iter = args.reg.counters.iterator();
+                    var idx: usize = 0;
+                    while (iter.next()) |entry| {
+                        const c = entry.value_ptr.*;
+                        args.counter_entries[idx] = .{
+                            .name = c.name,
+                            .help = c.help,
+                            .kind = .counter,
+                            .counter_value = c.get(),
+                        };
+                        idx += 1;
+                    }
+                }
+
+                // Join in reverse (LIFO) order -- spice requires this for queued job pop
+                if (timer_fut.join(t) == null) {
+                    captureTimerType(&args.reg.timers, args.timer_entries, args.timer_bucket_counts, args.timer_bucket_bounds);
+                }
+                if (hist_fut.join(t) == null) {
+                    captureHistType(&args.reg.histograms, args.hist_entries, args.hist_bucket_counts, args.hist_bucket_bounds, .histogram);
+                }
+                if (gauge_fut.join(t) == null) {
+                    var iter = args.reg.gauges.iterator();
+                    var idx: usize = 0;
+                    while (iter.next()) |entry| {
+                        const g = entry.value_ptr.*;
+                        args.gauge_entries[idx] = .{
+                            .name = g.name,
+                            .help = g.help,
+                            .kind = .gauge,
+                            .gauge_value = g.get(),
+                        };
+                        idx += 1;
+                    }
+                }
+            }
+        }.run, CaptureArgs{
+            .reg = self,
+            .counter_entries = counter_entries,
+            .gauge_entries = gauge_entries,
+            .hist_entries = hist_entries,
+            .timer_entries = timer_entries,
+            .hist_bucket_counts = hist_bucket_counts,
+            .hist_bucket_bounds = hist_bucket_bounds,
+            .timer_bucket_counts = timer_bucket_counts,
+            .timer_bucket_bounds = timer_bucket_bounds,
+        });
+
+        return .{
+            .entries = entries,
+            .bucket_count_storage = bucket_count_storage,
+            .bucket_bound_storage = bucket_bound_storage,
+            .allocator = self.allocator,
+            .timestamp_ns = std.time.nanoTimestamp(),
+        };
+    }
+
+    fn captureHistType(
+        histograms: *std.StringHashMap(*Histogram),
+        out: []snapshot_mod.MetricSnapshot,
+        counts: []u64,
+        bounds: []f64,
+        kind: snapshot_mod.MetricKind,
+    ) void {
+        var iter = histograms.iterator();
+        var idx: usize = 0;
+        var offset: usize = 0;
+        while (iter.next()) |entry| {
+            const h = entry.value_ptr.*;
+            const blen = h.buckets.len;
+            const count_slice = counts[offset .. offset + blen];
+            const bound_slice = bounds[offset .. offset + blen];
+            for (0..blen) |i| {
+                count_slice[i] = h.getBucketCount(i);
+                bound_slice[i] = h.buckets[i];
+            }
+            out[idx] = .{
+                .name = h.name,
+                .help = h.help,
+                .kind = kind,
+                .hist_count = h.getCount(),
+                .hist_sum = h.getSum(),
+                .hist_buckets = bound_slice,
+                .hist_bucket_counts = count_slice,
+            };
+            idx += 1;
+            offset += blen;
+        }
+    }
+
+    fn captureTimerType(
+        timers: *std.StringHashMap(*Timer),
+        out: []snapshot_mod.MetricSnapshot,
+        counts: []u64,
+        bounds: []f64,
+    ) void {
+        var iter = timers.iterator();
+        var idx: usize = 0;
+        var offset: usize = 0;
+        while (iter.next()) |entry| {
+            const t = entry.value_ptr.*;
+            const h = &t.histogram;
+            const blen = h.buckets.len;
+            const count_slice = counts[offset .. offset + blen];
+            const bound_slice = bounds[offset .. offset + blen];
+            for (0..blen) |i| {
+                count_slice[i] = h.getBucketCount(i);
+                bound_slice[i] = h.buckets[i];
+            }
+            out[idx] = .{
+                .name = h.name,
+                .help = h.help,
+                .kind = .timer,
+                .hist_count = h.getCount(),
+                .hist_sum = h.getSum(),
+                .hist_buckets = bound_slice,
+                .hist_bucket_counts = count_slice,
+            };
+            idx += 1;
+            offset += blen;
+        }
+    }
+
     /// Return the total number of registered metrics across all types.
     pub fn metricCount(self: *Registry) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lockShared();
+        defer self.rwlock.unlockShared();
         return self.counters.count() + self.gauges.count() +
             self.histograms.count() + self.timers.count();
     }

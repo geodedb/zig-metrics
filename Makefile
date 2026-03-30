@@ -5,6 +5,7 @@
 .PHONY: all build test test-unit test-integration clean check fmt help dev ci bench
 .PHONY: test-release-safe test-release-fast test-release-small test-all-optimizations
 .PHONY: pre-commit-install pre-commit pre-commit-run
+.PHONY: scale-bench bench-save bench-baseline bench-compare
 
 # Default target: build and run tests
 all: build test-unit
@@ -43,6 +44,31 @@ check:
 bench:
 	@echo "Running variance benchmark..."
 	@zig build bench -Doptimize=ReleaseFast
+
+# Run multi-tier scale benchmark (human-readable to stderr, JSON to stdout)
+scale-bench:
+	@zig build scale-bench
+
+# Run scale benchmark and save results with current commit SHA
+bench-save:
+	@mkdir -p benchmarks/results
+	@zig build scale-bench 2>/dev/null > benchmarks/results/$$(git rev-parse --short HEAD).json
+	@echo "Saved to benchmarks/results/$$(git rev-parse --short HEAD).json"
+
+# Run scale benchmark and save as the accepted baseline
+bench-baseline:
+	@mkdir -p benchmarks/results
+	@zig build scale-bench 2>/dev/null > benchmarks/results/baseline.json
+	@echo "Saved to benchmarks/results/baseline.json"
+
+# Run scale benchmark and compare against baseline (exits 1 on regression)
+bench-compare:
+	@if [ ! -f benchmarks/results/baseline.json ]; then \
+		echo "No baseline found. Run 'make bench-baseline' first."; \
+		exit 1; \
+	fi
+	@zig build scale-bench 2>/dev/null > /tmp/metrics-bench-current.json
+	@zig build compare-bench -- benchmarks/results/baseline.json /tmp/metrics-bench-current.json
 
 # Format source code
 fmt:
@@ -106,6 +132,13 @@ help:
 	@echo "  test-release-fast    Test with ReleaseFast"
 	@echo "  test-release-small   Test with ReleaseSmall"
 	@echo "  test-all-optimizations  Test all optimization levels"
+	@echo ""
+	@echo "Benchmarks:"
+	@echo "  bench                Run variance benchmark (stability)"
+	@echo "  scale-bench          Run multi-tier scale benchmark (JSON)"
+	@echo "  bench-save           Run and save results as <sha>.json"
+	@echo "  bench-baseline       Run and save as baseline.json"
+	@echo "  bench-compare        Run and compare against baseline"
 	@echo ""
 	@echo "Code Quality:"
 	@echo "  fmt                  Format source code"

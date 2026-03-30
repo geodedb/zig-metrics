@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const metrics = @import("metrics");
+const spice = @import("spice");
 
 // ============================================================================
 // Smoke Tests (MET-TEST-002)
@@ -142,4 +143,83 @@ test "public types are accessible" {
     _ = metrics.default_buckets;
     _ = metrics.default_timer_buckets;
     _ = metrics.writePrometheus;
+}
+
+// ============================================================================
+// Spice Integration (structured concurrency)
+// ============================================================================
+
+const SpiceCounterArgs = struct { counter: *metrics.Counter };
+
+fn spiceCounterWork(_: *spice.Task, args: SpiceCounterArgs) void {
+    for (0..10_000) |_| {
+        args.counter.inc();
+    }
+}
+
+test "spice: concurrent counter updates via thread pool" {
+    const thread_count = 4;
+
+    var pool = spice.ThreadPool.init(std.testing.allocator);
+    pool.start(.{ .background_worker_count = thread_count - 1 });
+    defer pool.deinit();
+
+    var reg = metrics.Registry.init(std.testing.allocator);
+    defer reg.deinit();
+
+    const c = try reg.counter("spice_counter", "spice test counter");
+
+    pool.call(void, struct {
+        pub fn run(t: *spice.Task, ctr: *metrics.Counter) void {
+            var futs: [thread_count - 1]spice.Future(SpiceCounterArgs, void) = undefined;
+            for (&futs) |*f| {
+                f.* = spice.Future(SpiceCounterArgs, void).init();
+                f.fork(t, spiceCounterWork, SpiceCounterArgs{ .counter = ctr });
+            }
+            spiceCounterWork(t, SpiceCounterArgs{ .counter = ctr });
+            // LIFO join order
+            var i: usize = futs.len;
+            while (i > 0) {
+                i -= 1;
+                if (futs[i].join(t) == null) {
+                    t.call(void, spiceCounterWork, SpiceCounterArgs{ .counter = ctr });
+                }
+            }
+        }
+    }.run, c);
+
+    try std.testing.expectEqual(@as(u64, 10_000 * thread_count), c.get());
+}
+
+test "spice: parallel snapshot captures consistent data" {
+    var pool = spice.ThreadPool.init(std.testing.allocator);
+    pool.start(.{ .background_worker_count = 3 });
+    defer pool.deinit();
+
+    var reg = metrics.Registry.init(std.testing.allocator);
+    defer reg.deinit();
+
+    const c = try reg.counter("ps_counter", "counter");
+    c.add(42);
+    const g = try reg.gauge("ps_gauge", "gauge");
+    g.set(-7);
+    const buckets = [_]f64{ 0.1, 1.0, 10.0 };
+    const h = try reg.histogram("ps_hist", "histogram", &buckets);
+    h.observe(0.5);
+    h.observe(5.0);
+
+    var snap = try reg.parallelSnapshot(&pool);
+    defer snap.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), snap.len());
+
+    const cs = snap.get("ps_counter") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 42), cs.counter_value);
+
+    const gs = snap.get("ps_gauge") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i64, -7), gs.gauge_value);
+
+    const hs = snap.get("ps_hist") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 2), hs.hist_count);
+    try std.testing.expectApproxEqAbs(@as(f64, 5.5), hs.hist_sum, 1e-10);
 }

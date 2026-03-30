@@ -5,6 +5,10 @@
 //!
 //! Counters represent a cumulative value that only ever goes up (or resets to zero).
 //! Typical uses: request counts, error counts, bytes transferred.
+//!
+//! All atomic operations use `.monotonic` ordering -- the weakest and fastest
+//! option. This is correct because counter values are independent scalars with
+//! no cross-field invariants. See `histogram.zig` for a detailed rationale.
 
 const std = @import("std");
 

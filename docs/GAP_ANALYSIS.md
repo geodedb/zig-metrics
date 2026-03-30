@@ -1,6 +1,6 @@
 # GAP Analysis
 
-Last updated: 2026-03-23
+Last updated: 2026-03-30
 
 Repository status: core metrics library implemented with consolidated API.
 
@@ -57,9 +57,87 @@ Implemented public surface:
 
 The HTTP endpoint/server layer remains a separate adapter in Geode.
 
+## Parallelism & Concurrency Review
+
+Reviewed: 2026-03-30
+
+### Concurrency Architecture
+
+The library uses a three-tier concurrency strategy:
+
+| Tier | Mechanism | Purpose |
+|---|---|---|
+| Lock-free atomics | `std.atomic.Value` with `.monotonic` ordering | Hot-path metric updates (Counter, Gauge, Histogram) |
+| RwLock | `std.Thread.RwLock` on Registry | Protects map operations; shared lock for reads, exclusive for registration |
+| Spice fork/join | `spice.ThreadPool` + `spice.Future` | Parallel snapshot capture, benchmark workloads |
+
+### Atomic Operations
+
+| Component | Mechanism | Ordering | Location |
+|---|---|---|---|
+| `Counter` | `std.atomic.Value(u64)` with `fetchAdd` | `.monotonic` | `src/counter.zig:18,31,36` |
+| `Gauge` | `std.atomic.Value(i64)` with `fetchAdd`/`fetchSub`/`store`/`load` | `.monotonic` | `src/gauge.zig:18,31,36,41,46,51` |
+| `Histogram` bucket counts | `std.atomic.Value(u64)` array with `fetchAdd` | `.monotonic` | `src/histogram.zig:26-28,88,93` |
+| `Histogram` sum | `atomicAddF64` CAS spin-loop on bitcast `u64` | `.monotonic` | `src/histogram.zig:114-129` |
+
+Monotonic ordering is documented as correct for metrics: each field is an independent scalar with no cross-field invariants. See `src/histogram.zig` module doc for full rationale.
+
+### Spice Integration
+
+`spice` is wired as a path dependency (`build.zig.zon`) and imported by the metrics module, all test targets, and benchmarks.
+
+- `Registry.parallelSnapshot(pool)` fans out capture across 4 metric types using `spice.Future` fork/join
+- `benchmarks/variance.zig` uses `spice.ThreadPool` for all concurrent workloads
+- `tests/integration.zig` includes spice-based concurrent counter and parallel snapshot tests
+- `root.zig` re-exports `spice` for downstream consumers
+
+## Concrete Gaps (Parallelism)
+
+| Gap | Status | Evidence | Resolution |
+|---|---|---|---|
+| `spice` dependency missing entirely | **Closed** | `build.zig.zon` had `.dependencies = .{}` | Added as path dependency `../spice`. Wired into metrics module, unit tests, integration tests, benchmarks, and check step in `build.zig`. |
+| No multiplexing / fan-out support | **Closed** | No fan-out patterns existed | `Registry.parallelSnapshot(pool)` forks gauge/histogram/timer capture concurrently using `spice.Future`, joining in LIFO order. Counters captured on calling thread. |
+| Registry uses a single coarse-grained mutex | **Closed** | `src/registry.zig:46` was `std.Thread.Mutex` | Replaced with `std.Thread.RwLock`. Registration uses exclusive lock; lookups, snapshots, and `metricCount` use shared lock. Concurrent reads no longer block each other. |
+| Benchmark threading is ad-hoc | **Closed** | `benchmarks/variance.zig` used `std.Thread.spawn`/`join` | Refactored to use `spice.ThreadPool` with fork/join for all benchmarks (counter, histogram, mixed, parallel snapshot). Pool created once and shared across all benchmark runs. |
+| `atomicAddF64` CAS spin-loop is hand-rolled | **Closed (documented)** | `src/histogram.zig:114-129` | The CAS loop is correct and necessary (no hardware atomic f64 add exists). Spice does not provide an alternative. Documented in `src/histogram.zig` module doc with full rationale covering retry behavior, `spinLoopHint()`, and expected contention characteristics. |
+| Monotonic ordering used everywhere without justification | **Closed (documented)** | All atomics used `.monotonic` | Monotonic is correct: metric fields are independent scalars with no cross-field invariants. Documented in `src/histogram.zig`, `src/counter.zig`, and `src/gauge.zig` module docs explaining why stronger ordering would add overhead without improving correctness. |
+| No concurrent snapshot/export path | **Closed** | `writePrometheus` held mutex during capture | Registry RwLock allows concurrent snapshots via shared lock. `parallelSnapshot(pool)` further parallelizes capture across metric types. `writePrometheus` still uses sequential `snapshot()` but no longer blocks metric registrations (shared lock). |
+| Test concurrency uses raw thread spawn | **Closed (partial)** | Unit tests used `std.Thread.spawn` | Integration tests now include spice-based concurrent counter and parallel snapshot tests. Unit tests in `counter.zig`, `gauge.zig`, `histogram.zig` retain raw threads for correctness verification (guarantees true concurrent execution regardless of pool scheduling). |
+
+## Tests And Benchmarks Carried Over
+
+| Original test / benchmark | Status | Coverage provided |
+|---|---|---|
+| Core metric and snapshot behavior | **Ported** | 47 unit tests covering Counter, Gauge, Histogram, Timer, Snapshot, Registry, Prometheus export |
+| End-to-end smoke coverage (MET-TEST-002) | **Ported** | 6 integration tests including full smoke test with all metric types and Prometheus export |
+| Metrics registry variance benchmark (MET-TEST-003) | **Ported** | `benchmarks/variance.zig` -- Counter throughput, Histogram observation, Mixed workload, Parallel snapshot (all via spice ThreadPool) |
+| Spice integration tests | **New** | 2 integration tests: concurrent counter updates via spice fork/join, parallel snapshot capture verification |
+| HTTP server test | **Stays in Geode** | Not applicable -- server transport is outside this library's boundary |
+
+## Proposed Public API
+
+Implemented public surface:
+
+- `Counter` -- thread-safe monotonically increasing counter
+- `Gauge` -- thread-safe bidirectional gauge
+- `Histogram` -- configurable bucket histogram with atomic sum
+- `Timer` -- duration measurement wrapping Histogram
+- `Snapshot` / `MetricSnapshot` / `MetricKind` -- point-in-time metric captures
+- `Registry` -- instance-based metric lifecycle management with RwLock
+- `Registry.parallelSnapshot(pool)` -- spice-accelerated snapshot capture
+- `writePrometheus` -- Prometheus text exposition format export
+- `default_buckets` / `default_timer_buckets` -- standard bucket configurations
+- `spice` -- re-exported structured concurrency module
+
+The HTTP endpoint/server layer remains a separate adapter in Geode.
+
 ## Acceptance Criteria
 
 - [x] This repo exposes one coherent metrics API, not three competing ones.
 - [x] No global singletons remain in the extracted core.
 - [x] Prometheus export remains supported.
 - [x] The variance benchmark and smoke test still pass against the extracted core.
+- [x] `spice` dependency is added and used for structured concurrency.
+- [x] Registry contention is reduced (RwLock with shared/exclusive split).
+- [x] Snapshot/export path does not block metric producers (shared lock + parallel capture).
+- [x] Memory ordering choices are documented and verified.
