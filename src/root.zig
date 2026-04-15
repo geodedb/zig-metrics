@@ -66,8 +66,8 @@ pub const MetricKind = @import("snapshot.zig").MetricKind;
 pub const Registry = @import("registry.zig").Registry;
 pub const RegistryError = @import("registry.zig").RegistryError;
 
-/// Spice structured concurrency (re-exported for consumers).
-pub const spice = @import("spice");
+/// Thread pool structured concurrency (re-exported for consumers).
+pub const thread_pool = @import("thread_pool");
 
 /// Prometheus text format exporter.
 pub const prometheus = @import("prometheus.zig");

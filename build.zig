@@ -7,12 +7,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Spice dependency (structured concurrency)
-    const spice_dep = b.dependency("spice", .{
+    // Thread pool dependency (structured concurrency)
+    const tp_dep = b.dependency("thread_pool", .{
         .target = target,
         .optimize = optimize,
     });
-    const spice_module = spice_dep.module("spice");
+    const tp_module = tp_dep.module("thread_pool");
 
     // Main library module
     const module = b.addModule("metrics", .{
@@ -20,7 +20,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "spice", .module = spice_module },
+            .{ .name = "thread_pool", .module = tp_module },
         },
     });
 
@@ -32,7 +32,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "spice", .module = spice_module },
+                .{ .name = "thread_pool", .module = tp_module },
             },
         }),
     });
@@ -48,7 +48,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "metrics", .module = module },
-                .{ .name = "spice", .module = spice_module },
+                .{ .name = "thread_pool", .module = tp_module },
             },
         }),
     });
@@ -65,7 +65,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "metrics", .module = module },
-                .{ .name = "spice", .module = spice_module },
+                .{ .name = "thread_pool", .module = tp_module },
             },
         }),
     });
@@ -82,7 +82,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
             .imports = &.{
                 .{ .name = "metrics", .module = module },
-                .{ .name = "spice", .module = spice_module },
+                .{ .name = "thread_pool", .module = tp_module },
             },
         }),
     });
@@ -112,7 +112,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "spice", .module = spice_module },
+                .{ .name = "thread_pool", .module = tp_module },
             },
         }),
     });

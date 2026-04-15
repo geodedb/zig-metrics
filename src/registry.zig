@@ -8,7 +8,7 @@
 //! Thread-safe for concurrent registration and collection.
 
 const std = @import("std");
-const spice = @import("spice");
+const tp = @import("thread_pool");
 const Counter = @import("counter.zig").Counter;
 const Gauge = @import("gauge.zig").Gauge;
 const Histogram = @import("histogram.zig").Histogram;
@@ -274,12 +274,12 @@ pub const Registry = struct {
         );
     }
 
-    /// Capture a snapshot using spice fork/join to fan-out capture across
-    /// the four metric types concurrently. Each metric type is captured
+    /// Capture a snapshot using thread-pool submitBatch to fan-out capture
+    /// across the four metric types concurrently. Each metric type is captured
     /// on a separate worker thread when workers are available.
     ///
-    /// Requires an active spice ThreadPool with background workers started.
-    pub fn parallelSnapshot(self: *Registry, pool: *spice.ThreadPool) error{OutOfMemory}!Snapshot {
+    /// Requires an initialised thread-pool.
+    pub fn parallelSnapshot(self: *Registry, pool: *tp.ThreadPool) error{OutOfMemory}!Snapshot {
         self.rwlock.lockShared();
         defer self.rwlock.unlockShared();
 
@@ -320,49 +320,50 @@ pub const Registry = struct {
         const timer_bucket_counts = bucket_count_storage[hist_bucket_total..bucket_total];
         const timer_bucket_bounds = bucket_bound_storage[hist_bucket_total..bucket_total];
 
-        // Fan-out capture across 4 metric types using spice fork/join.
-        // Counters run on the calling thread; gauges, histograms, timers are forked.
-        const CaptureArgs = struct {
-            reg: *Registry,
-            counter_entries: []snapshot_mod.MetricSnapshot,
-            gauge_entries: []snapshot_mod.MetricSnapshot,
-            hist_entries: []snapshot_mod.MetricSnapshot,
-            timer_entries: []snapshot_mod.MetricSnapshot,
-            hist_bucket_counts: []u64,
-            hist_bucket_bounds: []f64,
-            timer_bucket_counts: []u64,
-            timer_bucket_bounds: []f64,
+        // Task context types for the three background captures.
+        const GaugeCtx = struct {
+            gauges: *std.StringHashMap(*Gauge),
+            out: []snapshot_mod.MetricSnapshot,
+        };
+        const HistCtx = struct {
+            histograms: *std.StringHashMap(*Histogram),
+            out: []snapshot_mod.MetricSnapshot,
+            counts: []u64,
+            bounds: []f64,
+        };
+        const TimerCtx = struct {
+            timers: *std.StringHashMap(*Timer),
+            out: []snapshot_mod.MetricSnapshot,
+            counts: []u64,
+            bounds: []f64,
         };
 
-        pool.call(void, struct {
-            pub fn run(t: *spice.Task, args: CaptureArgs) void {
-                const GaugeInput = struct {
-                    gauges: *std.StringHashMap(*Gauge),
-                    out: []snapshot_mod.MetricSnapshot,
-                };
-                const HistInput = struct {
-                    histograms: *std.StringHashMap(*Histogram),
-                    out: []snapshot_mod.MetricSnapshot,
-                    counts: []u64,
-                    bounds: []f64,
-                };
-                const TimerInput = struct {
-                    timers: *std.StringHashMap(*Timer),
-                    out: []snapshot_mod.MetricSnapshot,
-                    counts: []u64,
-                    bounds: []f64,
-                };
+        var gauge_ctx = GaugeCtx{ .gauges = &self.gauges, .out = gauge_entries };
+        var hist_ctx = HistCtx{
+            .histograms = &self.histograms,
+            .out = hist_entries,
+            .counts = hist_bucket_counts,
+            .bounds = hist_bucket_bounds,
+        };
+        var timer_ctx = TimerCtx{
+            .timers = &self.timers,
+            .out = timer_entries,
+            .counts = timer_bucket_counts,
+            .bounds = timer_bucket_bounds,
+        };
 
-                // Fork gauges
-                var gauge_fut = spice.Future(GaugeInput, void).init();
-                gauge_fut.fork(t, struct {
-                    pub fn capture(t2: *spice.Task, input: GaugeInput) void {
-                        _ = t2;
-                        var iter = input.gauges.iterator();
+        // Fan-out gauges, histograms, timers to the thread pool.
+        var wg = pool.waitGroup();
+        const tasks = [_]tp.BatchTask{
+            .{
+                .task_fn = struct {
+                    fn run(ctx: *anyopaque, _: *tp.TaskContext) void {
+                        const c: *GaugeCtx = @ptrCast(@alignCast(ctx));
+                        var iter = c.gauges.iterator();
                         var idx: usize = 0;
                         while (iter.next()) |entry| {
                             const g = entry.value_ptr.*;
-                            input.out[idx] = .{
+                            c.out[idx] = .{
                                 .name = g.name,
                                 .help = g.help,
                                 .kind = .gauge,
@@ -371,75 +372,47 @@ pub const Registry = struct {
                             idx += 1;
                         }
                     }
-                }.capture, .{ .gauges = &args.reg.gauges, .out = args.gauge_entries });
-
-                // Fork histograms
-                var hist_fut = spice.Future(HistInput, void).init();
-                hist_fut.fork(t, struct {
-                    pub fn capture(t2: *spice.Task, input: HistInput) void {
-                        _ = t2;
-                        captureHistType(input.histograms, input.out, input.counts, input.bounds, .histogram);
+                }.run,
+                .ctx = &gauge_ctx,
+            },
+            .{
+                .task_fn = struct {
+                    fn run(ctx: *anyopaque, _: *tp.TaskContext) void {
+                        const c: *HistCtx = @ptrCast(@alignCast(ctx));
+                        captureHistType(c.histograms, c.out, c.counts, c.bounds, .histogram);
                     }
-                }.capture, .{ .histograms = &args.reg.histograms, .out = args.hist_entries, .counts = args.hist_bucket_counts, .bounds = args.hist_bucket_bounds });
-
-                // Fork timers
-                var timer_fut = spice.Future(TimerInput, void).init();
-                timer_fut.fork(t, struct {
-                    pub fn capture(t2: *spice.Task, input: TimerInput) void {
-                        _ = t2;
-                        captureTimerType(input.timers, input.out, input.counts, input.bounds);
+                }.run,
+                .ctx = &hist_ctx,
+            },
+            .{
+                .task_fn = struct {
+                    fn run(ctx: *anyopaque, _: *tp.TaskContext) void {
+                        const c: *TimerCtx = @ptrCast(@alignCast(ctx));
+                        captureTimerType(c.timers, c.out, c.counts, c.bounds);
                     }
-                }.capture, .{ .timers = &args.reg.timers, .out = args.timer_entries, .counts = args.timer_bucket_counts, .bounds = args.timer_bucket_bounds });
+                }.run,
+                .ctx = &timer_ctx,
+            },
+        };
+        _ = pool.submitBatch(&tasks, .{ .wait_group = &wg }) catch return error.OutOfMemory;
 
-                // Capture counters on calling thread
-                {
-                    var iter = args.reg.counters.iterator();
-                    var idx: usize = 0;
-                    while (iter.next()) |entry| {
-                        const c = entry.value_ptr.*;
-                        args.counter_entries[idx] = .{
-                            .name = c.name,
-                            .help = c.help,
-                            .kind = .counter,
-                            .counter_value = c.get(),
-                        };
-                        idx += 1;
-                    }
-                }
-
-                // Join in reverse (LIFO) order -- spice requires this for queued job pop
-                if (timer_fut.join(t) == null) {
-                    captureTimerType(&args.reg.timers, args.timer_entries, args.timer_bucket_counts, args.timer_bucket_bounds);
-                }
-                if (hist_fut.join(t) == null) {
-                    captureHistType(&args.reg.histograms, args.hist_entries, args.hist_bucket_counts, args.hist_bucket_bounds, .histogram);
-                }
-                if (gauge_fut.join(t) == null) {
-                    var iter = args.reg.gauges.iterator();
-                    var idx: usize = 0;
-                    while (iter.next()) |entry| {
-                        const g = entry.value_ptr.*;
-                        args.gauge_entries[idx] = .{
-                            .name = g.name,
-                            .help = g.help,
-                            .kind = .gauge,
-                            .gauge_value = g.get(),
-                        };
-                        idx += 1;
-                    }
-                }
+        // Capture counters on the calling thread while workers run.
+        {
+            var iter = self.counters.iterator();
+            var idx: usize = 0;
+            while (iter.next()) |entry| {
+                const c = entry.value_ptr.*;
+                counter_entries[idx] = .{
+                    .name = c.name,
+                    .help = c.help,
+                    .kind = .counter,
+                    .counter_value = c.get(),
+                };
+                idx += 1;
             }
-        }.run, CaptureArgs{
-            .reg = self,
-            .counter_entries = counter_entries,
-            .gauge_entries = gauge_entries,
-            .hist_entries = hist_entries,
-            .timer_entries = timer_entries,
-            .hist_bucket_counts = hist_bucket_counts,
-            .hist_bucket_bounds = hist_bucket_bounds,
-            .timer_bucket_counts = timer_bucket_counts,
-            .timer_bucket_bounds = timer_bucket_bounds,
-        });
+        }
+
+        wg.wait();
 
         return .{
             .entries = entries,

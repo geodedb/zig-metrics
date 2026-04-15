@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const metrics = @import("metrics");
-const spice = @import("spice");
+const tp = @import("thread_pool");
 
 // ============================================================================
 // Smoke Tests (MET-TEST-002)
@@ -146,54 +146,45 @@ test "public types are accessible" {
 }
 
 // ============================================================================
-// Spice Integration (structured concurrency)
+// Thread pool integration (structured concurrency)
 // ============================================================================
 
-const SpiceCounterArgs = struct { counter: *metrics.Counter };
+const CounterArgs = struct { counter: *metrics.Counter };
 
-fn spiceCounterWork(_: *spice.Task, args: SpiceCounterArgs) void {
+fn counterTask(ctx: *anyopaque, _: *tp.TaskContext) void {
+    const args: *CounterArgs = @ptrCast(@alignCast(ctx));
     for (0..10_000) |_| {
         args.counter.inc();
     }
 }
 
-test "spice: concurrent counter updates via thread pool" {
+test "thread_pool: concurrent counter updates via thread pool" {
     const thread_count = 4;
 
-    var pool = spice.ThreadPool.init(std.testing.allocator);
-    pool.start(.{ .background_worker_count = thread_count - 1 });
+    var pool = try tp.ThreadPool.init(std.testing.allocator, .{});
     defer pool.deinit();
 
     var reg = metrics.Registry.init(std.testing.allocator);
     defer reg.deinit();
 
-    const c = try reg.counter("spice_counter", "spice test counter");
+    const c = try reg.counter("tp_counter", "thread_pool test counter");
 
-    pool.call(void, struct {
-        pub fn run(t: *spice.Task, ctr: *metrics.Counter) void {
-            var futs: [thread_count - 1]spice.Future(SpiceCounterArgs, void) = undefined;
-            for (&futs) |*f| {
-                f.* = spice.Future(SpiceCounterArgs, void).init();
-                f.fork(t, spiceCounterWork, SpiceCounterArgs{ .counter = ctr });
-            }
-            spiceCounterWork(t, SpiceCounterArgs{ .counter = ctr });
-            // LIFO join order
-            var i: usize = futs.len;
-            while (i > 0) {
-                i -= 1;
-                if (futs[i].join(t) == null) {
-                    t.call(void, spiceCounterWork, SpiceCounterArgs{ .counter = ctr });
-                }
-            }
-        }
-    }.run, c);
+    var args: [thread_count]CounterArgs = undefined;
+    var tasks: [thread_count]tp.BatchTask = undefined;
+    for (0..thread_count) |i| {
+        args[i] = .{ .counter = c };
+        tasks[i] = .{ .task_fn = counterTask, .ctx = &args[i] };
+    }
+
+    var wg = pool.waitGroup();
+    _ = try pool.submitBatch(&tasks, .{ .wait_group = &wg });
+    wg.wait();
 
     try std.testing.expectEqual(@as(u64, 10_000 * thread_count), c.get());
 }
 
-test "spice: parallel snapshot captures consistent data" {
-    var pool = spice.ThreadPool.init(std.testing.allocator);
-    pool.start(.{ .background_worker_count = 3 });
+test "thread_pool: parallel snapshot captures consistent data" {
+    var pool = try tp.ThreadPool.init(std.testing.allocator, .{});
     defer pool.deinit();
 
     var reg = metrics.Registry.init(std.testing.allocator);

@@ -17,7 +17,7 @@
 
 const std = @import("std");
 const metrics = @import("metrics");
-const spice = @import("spice");
+const tp = @import("thread_pool");
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -65,14 +65,14 @@ const TierResult = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Spice work function argument types (must be named for type identity)
+// Task context types for thread-pool work functions
 // ---------------------------------------------------------------------------
 
-const CounterWorkArgs = struct { counter: *metrics.Counter, iterations: u64 };
-const GaugeWorkArgs = struct { gauge: *metrics.Gauge, iterations: u64 };
-const HistogramWorkArgs = struct { histogram: *metrics.Histogram, iterations: u64, seed: u64 };
-const TimerWorkArgs = struct { timer: *metrics.Timer, iterations: u64, seed: u64 };
-const MixedWorkArgs = struct {
+const CounterWorkCtx = struct { counter: *metrics.Counter, iterations: u64 };
+const GaugeWorkCtx = struct { gauge: *metrics.Gauge, iterations: u64 };
+const HistogramWorkCtx = struct { histogram: *metrics.Histogram, iterations: u64, seed: u64 };
+const TimerWorkCtx = struct { timer: *metrics.Timer, iterations: u64, seed: u64 };
+const MixedWorkCtx = struct {
     counters: [*]const *metrics.Counter,
     gauges: [*]const *metrics.Gauge,
     histograms: [*]const *metrics.Histogram,
@@ -80,21 +80,6 @@ const MixedWorkArgs = struct {
     len: usize,
     iterations: u64,
     seed: u64,
-};
-
-// Run-args types for pool.call (must be named to match spice type identity)
-const CounterRunArgs = struct { c: *metrics.Counter, tc: usize, iters: u64 };
-const GaugeRunArgs = struct { g: *metrics.Gauge, tc: usize, iters: u64 };
-const HistogramRunArgs = struct { h: *metrics.Histogram, tc: usize, iters: u64 };
-const TimerRunArgs = struct { tmr: *metrics.Timer, tc: usize, iters: u64 };
-const MixedRunArgs = struct {
-    cp: [*]const *metrics.Counter,
-    gp: [*]const *metrics.Gauge,
-    hp: [*]const *metrics.Histogram,
-    tp: [*]const *metrics.Timer,
-    len: usize,
-    tc: usize,
-    iters: u64,
 };
 
 // ---------------------------------------------------------------------------
@@ -296,6 +281,11 @@ fn benchRegistration(
     return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(total));
 }
 
+fn counterWorkFn(ctx: *anyopaque, _: *tp.TaskContext) void {
+    const c: *CounterWorkCtx = @ptrCast(@alignCast(ctx));
+    for (0..c.iterations) |_| c.counter.inc();
+}
+
 fn benchCounter(allocator: std.mem.Allocator, tier: Tier) !f64 {
     var reg = metrics.Registry.init(allocator);
     defer reg.deinit();
@@ -305,33 +295,31 @@ fn benchCounter(allocator: std.mem.Allocator, tier: Tier) !f64 {
     for (0..WARMUP_ITERATIONS) |_| c.inc();
     c.reset();
 
-    var pool = spice.ThreadPool.init(allocator);
-    pool.start(.{ .background_worker_count = tier.thread_count - 1 });
+    var pool = try tp.ThreadPool.init(allocator, .{});
     defer pool.deinit();
 
+    const task_ctxs = try allocator.alloc(CounterWorkCtx, tier.thread_count);
+    defer allocator.free(task_ctxs);
+    const tasks = try allocator.alloc(tp.BatchTask, tier.thread_count);
+    defer allocator.free(tasks);
+    for (0..tier.thread_count) |i| {
+        task_ctxs[i] = .{ .counter = c, .iterations = tier.iterations };
+        tasks[i] = .{ .task_fn = counterWorkFn, .ctx = &task_ctxs[i] };
+    }
+
+    var wg = pool.waitGroup();
     const start = std.time.nanoTimestamp();
-    pool.call(void, struct {
-        pub fn run(t: *spice.Task, args: CounterRunArgs) void {
-            const futs = @constCast(&([1]spice.Future(CounterWorkArgs, void){spice.Future(CounterWorkArgs, void).init()} ** (16 - 1)));
-            const count = args.tc - 1;
-            for (futs[0..count]) |*f| {
-                f.* = spice.Future(CounterWorkArgs, void).init();
-                f.fork(t, counterWork, CounterWorkArgs{ .counter = args.c, .iterations = args.iters });
-            }
-            counterWork(t, CounterWorkArgs{ .counter = args.c, .iterations = args.iters });
-            var i: usize = count;
-            while (i > 0) {
-                i -= 1;
-                if (futs[i].join(t) == null) {
-                    t.call(void, counterWork, CounterWorkArgs{ .counter = args.c, .iterations = args.iters });
-                }
-            }
-        }
-    }.run, CounterRunArgs{ .c = c, .tc = tier.thread_count, .iters = tier.iterations });
+    _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
+    wg.wait();
     const elapsed_ns: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
 
     const total_ops = tier.thread_count * tier.iterations;
     return opsPerSec(total_ops, elapsed_ns);
+}
+
+fn gaugeWorkFn(ctx: *anyopaque, _: *tp.TaskContext) void {
+    const c: *GaugeWorkCtx = @ptrCast(@alignCast(ctx));
+    for (0..c.iterations) |_| c.gauge.inc();
 }
 
 fn benchGauge(allocator: std.mem.Allocator, tier: Tier) !f64 {
@@ -339,32 +327,32 @@ fn benchGauge(allocator: std.mem.Allocator, tier: Tier) !f64 {
     defer reg.deinit();
     const g = try reg.gauge("bench_g", "bench");
 
-    var pool = spice.ThreadPool.init(allocator);
-    pool.start(.{ .background_worker_count = tier.thread_count - 1 });
+    var pool = try tp.ThreadPool.init(allocator, .{});
     defer pool.deinit();
 
+    const task_ctxs = try allocator.alloc(GaugeWorkCtx, tier.thread_count);
+    defer allocator.free(task_ctxs);
+    const tasks = try allocator.alloc(tp.BatchTask, tier.thread_count);
+    defer allocator.free(tasks);
+    for (0..tier.thread_count) |i| {
+        task_ctxs[i] = .{ .gauge = g, .iterations = tier.iterations };
+        tasks[i] = .{ .task_fn = gaugeWorkFn, .ctx = &task_ctxs[i] };
+    }
+
+    var wg = pool.waitGroup();
     const start = std.time.nanoTimestamp();
-    pool.call(void, struct {
-        pub fn run(t: *spice.Task, args: GaugeRunArgs) void {
-            const futs = @constCast(&([1]spice.Future(GaugeWorkArgs, void){spice.Future(GaugeWorkArgs, void).init()} ** (16 - 1)));
-            const count = args.tc - 1;
-            for (futs[0..count]) |*f| {
-                f.* = spice.Future(GaugeWorkArgs, void).init();
-                f.fork(t, gaugeWork, GaugeWorkArgs{ .gauge = args.g, .iterations = args.iters });
-            }
-            gaugeWork(t, GaugeWorkArgs{ .gauge = args.g, .iterations = args.iters });
-            var i: usize = count;
-            while (i > 0) {
-                i -= 1;
-                if (futs[i].join(t) == null) {
-                    t.call(void, gaugeWork, GaugeWorkArgs{ .gauge = args.g, .iterations = args.iters });
-                }
-            }
-        }
-    }.run, GaugeRunArgs{ .g = g, .tc = tier.thread_count, .iters = tier.iterations });
+    _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
+    wg.wait();
     const elapsed_ns: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
 
     return opsPerSec(tier.thread_count * tier.iterations, elapsed_ns);
+}
+
+fn histogramWorkFn(ctx: *anyopaque, _: *tp.TaskContext) void {
+    const c: *HistogramWorkCtx = @ptrCast(@alignCast(ctx));
+    var rng = std.Random.DefaultPrng.init(c.seed);
+    const random = rng.random();
+    for (0..c.iterations) |_| c.histogram.observe(random.float(f64) * 10.0);
 }
 
 fn benchHistogram(allocator: std.mem.Allocator, tier: Tier) !f64 {
@@ -372,32 +360,32 @@ fn benchHistogram(allocator: std.mem.Allocator, tier: Tier) !f64 {
     defer reg.deinit();
     const h = try reg.histogram("bench_h", "bench", &DEFAULT_BUCKETS);
 
-    var pool = spice.ThreadPool.init(allocator);
-    pool.start(.{ .background_worker_count = tier.thread_count - 1 });
+    var pool = try tp.ThreadPool.init(allocator, .{});
     defer pool.deinit();
 
+    const task_ctxs = try allocator.alloc(HistogramWorkCtx, tier.thread_count);
+    defer allocator.free(task_ctxs);
+    const tasks = try allocator.alloc(tp.BatchTask, tier.thread_count);
+    defer allocator.free(tasks);
+    for (0..tier.thread_count) |i| {
+        task_ctxs[i] = .{ .histogram = h, .iterations = tier.iterations, .seed = i };
+        tasks[i] = .{ .task_fn = histogramWorkFn, .ctx = &task_ctxs[i] };
+    }
+
+    var wg = pool.waitGroup();
     const start = std.time.nanoTimestamp();
-    pool.call(void, struct {
-        pub fn run(t: *spice.Task, args: HistogramRunArgs) void {
-            const futs = @constCast(&([1]spice.Future(HistogramWorkArgs, void){spice.Future(HistogramWorkArgs, void).init()} ** (16 - 1)));
-            const count = args.tc - 1;
-            for (futs[0..count], 0..) |*f, idx| {
-                f.* = spice.Future(HistogramWorkArgs, void).init();
-                f.fork(t, histogramWork, HistogramWorkArgs{ .histogram = args.h, .iterations = args.iters, .seed = idx });
-            }
-            histogramWork(t, HistogramWorkArgs{ .histogram = args.h, .iterations = args.iters, .seed = 999 });
-            var i: usize = count;
-            while (i > 0) {
-                i -= 1;
-                if (futs[i].join(t) == null) {
-                    t.call(void, histogramWork, HistogramWorkArgs{ .histogram = args.h, .iterations = args.iters, .seed = i + 100 });
-                }
-            }
-        }
-    }.run, HistogramRunArgs{ .h = h, .tc = tier.thread_count, .iters = tier.iterations });
+    _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
+    wg.wait();
     const elapsed_ns: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
 
     return opsPerSec(tier.thread_count * tier.iterations, elapsed_ns);
+}
+
+fn timerWorkFn(ctx: *anyopaque, _: *tp.TaskContext) void {
+    const c: *TimerWorkCtx = @ptrCast(@alignCast(ctx));
+    var rng = std.Random.DefaultPrng.init(c.seed);
+    const random = rng.random();
+    for (0..c.iterations) |_| c.timer.recordSeconds(random.float(f64));
 }
 
 fn benchTimer(allocator: std.mem.Allocator, tier: Tier) !f64 {
@@ -405,29 +393,22 @@ fn benchTimer(allocator: std.mem.Allocator, tier: Tier) !f64 {
     defer reg.deinit();
     const tmr = try reg.timer("bench_t", "bench", &DEFAULT_BUCKETS);
 
-    var pool = spice.ThreadPool.init(allocator);
-    pool.start(.{ .background_worker_count = tier.thread_count - 1 });
+    var pool = try tp.ThreadPool.init(allocator, .{});
     defer pool.deinit();
 
+    const task_ctxs = try allocator.alloc(TimerWorkCtx, tier.thread_count);
+    defer allocator.free(task_ctxs);
+    const tasks = try allocator.alloc(tp.BatchTask, tier.thread_count);
+    defer allocator.free(tasks);
+    for (0..tier.thread_count) |i| {
+        task_ctxs[i] = .{ .timer = tmr, .iterations = tier.iterations, .seed = i };
+        tasks[i] = .{ .task_fn = timerWorkFn, .ctx = &task_ctxs[i] };
+    }
+
+    var wg = pool.waitGroup();
     const start = std.time.nanoTimestamp();
-    pool.call(void, struct {
-        pub fn run(t: *spice.Task, args: TimerRunArgs) void {
-            const futs = @constCast(&([1]spice.Future(TimerWorkArgs, void){spice.Future(TimerWorkArgs, void).init()} ** (16 - 1)));
-            const count = args.tc - 1;
-            for (futs[0..count], 0..) |*f, idx| {
-                f.* = spice.Future(TimerWorkArgs, void).init();
-                f.fork(t, timerWork, TimerWorkArgs{ .timer = args.tmr, .iterations = args.iters, .seed = idx });
-            }
-            timerWork(t, TimerWorkArgs{ .timer = args.tmr, .iterations = args.iters, .seed = 999 });
-            var i: usize = count;
-            while (i > 0) {
-                i -= 1;
-                if (futs[i].join(t) == null) {
-                    t.call(void, timerWork, TimerWorkArgs{ .timer = args.tmr, .iterations = args.iters, .seed = i + 100 });
-                }
-            }
-        }
-    }.run, TimerRunArgs{ .tmr = tmr, .tc = tier.thread_count, .iters = tier.iterations });
+    _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
+    wg.wait();
     const elapsed_ns: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
 
     return opsPerSec(tier.thread_count * tier.iterations, elapsed_ns);
@@ -472,9 +453,9 @@ fn benchParallelSnapshot(
     var reg = try populateRegistry(allocator, counter_names, gauge_names, hist_names, timer_names);
     defer reg.deinit();
 
-    var pool = spice.ThreadPool.init(allocator);
-    pool.start(.{ .background_worker_count = @min(tier.thread_count, 3) });
+    var pool = try tp.ThreadPool.init(allocator, .{});
     defer pool.deinit();
+    _ = tier;
 
     // Warmup
     for (0..3) |_| {
@@ -524,6 +505,27 @@ fn benchPrometheus(
     return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(PROMETHEUS_SAMPLES)) / 1_000_000.0;
 }
 
+fn mixedWorkFn(ctx: *anyopaque, _: *tp.TaskContext) void {
+    const c: *MixedWorkCtx = @ptrCast(@alignCast(ctx));
+    var rng = std.Random.DefaultPrng.init(c.seed);
+    const random = rng.random();
+    const counters = c.counters[0..c.len];
+    const gauges = c.gauges[0..c.len];
+    const histograms = c.histograms[0..c.len];
+    const timers = c.timers[0..c.len];
+
+    for (0..c.iterations) |_| {
+        const idx = random.uintLessThan(usize, c.len);
+        const op = random.uintLessThan(u8, 10);
+        switch (op) {
+            0...3 => counters[idx].inc(),
+            4, 5 => gauges[idx].set(random.int(i64)),
+            6...8 => histograms[idx].observe(random.float(f64) * 10.0),
+            else => timers[idx].recordSeconds(random.float(f64)),
+        }
+    }
+}
+
 fn benchMixed(
     allocator: std.mem.Allocator,
     tier: Tier,
@@ -535,7 +537,6 @@ fn benchMixed(
     var reg = try populateRegistry(allocator, counter_names, gauge_names, hist_names, timer_names);
     defer reg.deinit();
 
-    // Collect metric pointers into arrays for random access
     const n = counter_names.len;
     const counter_ptrs = try allocator.alloc(*metrics.Counter, n);
     defer allocator.free(counter_ptrs);
@@ -551,108 +552,33 @@ fn benchMixed(
     for (hist_names, 0..) |name, i| hist_ptrs[i] = reg.getHistogram(name).?;
     for (timer_names, 0..) |name, i| timer_ptrs[i] = reg.getTimer(name).?;
 
-    var pool = spice.ThreadPool.init(allocator);
-    pool.start(.{ .background_worker_count = tier.thread_count - 1 });
+    var pool = try tp.ThreadPool.init(allocator, .{});
     defer pool.deinit();
 
+    const task_ctxs = try allocator.alloc(MixedWorkCtx, tier.thread_count);
+    defer allocator.free(task_ctxs);
+    const tasks = try allocator.alloc(tp.BatchTask, tier.thread_count);
+    defer allocator.free(tasks);
+    for (0..tier.thread_count) |i| {
+        task_ctxs[i] = .{
+            .counters = counter_ptrs.ptr,
+            .gauges = gauge_ptrs.ptr,
+            .histograms = hist_ptrs.ptr,
+            .timers = timer_ptrs.ptr,
+            .len = n,
+            .iterations = tier.iterations,
+            .seed = i,
+        };
+        tasks[i] = .{ .task_fn = mixedWorkFn, .ctx = &task_ctxs[i] };
+    }
+
+    var wg = pool.waitGroup();
     const start = std.time.nanoTimestamp();
-    pool.call(void, struct {
-        pub fn run(t: *spice.Task, args: MixedRunArgs) void {
-            const futs = @constCast(&([1]spice.Future(MixedWorkArgs, void){spice.Future(MixedWorkArgs, void).init()} ** (16 - 1)));
-            const count = args.tc - 1;
-            for (futs[0..count], 0..) |*f, idx| {
-                f.* = spice.Future(MixedWorkArgs, void).init();
-                f.fork(t, mixedWork, MixedWorkArgs{
-                    .counters = args.cp,
-                    .gauges = args.gp,
-                    .histograms = args.hp,
-                    .timers = args.tp,
-                    .len = args.len,
-                    .iterations = args.iters,
-                    .seed = idx,
-                });
-            }
-            mixedWork(t, MixedWorkArgs{
-                .counters = args.cp,
-                .gauges = args.gp,
-                .histograms = args.hp,
-                .timers = args.tp,
-                .len = args.len,
-                .iterations = args.iters,
-                .seed = 999,
-            });
-            var i: usize = count;
-            while (i > 0) {
-                i -= 1;
-                if (futs[i].join(t) == null) {
-                    t.call(void, mixedWork, MixedWorkArgs{
-                        .counters = args.cp,
-                        .gauges = args.gp,
-                        .histograms = args.hp,
-                        .timers = args.tp,
-                        .len = args.len,
-                        .iterations = args.iters,
-                        .seed = i + 500,
-                    });
-                }
-            }
-        }
-    }.run, MixedRunArgs{
-        .cp = counter_ptrs.ptr,
-        .gp = gauge_ptrs.ptr,
-        .hp = hist_ptrs.ptr,
-        .tp = timer_ptrs.ptr,
-        .len = n,
-        .tc = tier.thread_count,
-        .iters = tier.iterations,
-    });
+    _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
+    wg.wait();
     const elapsed_ns: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
 
     return opsPerSec(tier.thread_count * tier.iterations, elapsed_ns);
-}
-
-// ---------------------------------------------------------------------------
-// Spice work functions
-// ---------------------------------------------------------------------------
-
-fn counterWork(_: *spice.Task, args: CounterWorkArgs) void {
-    for (0..args.iterations) |_| args.counter.inc();
-}
-
-fn gaugeWork(_: *spice.Task, args: GaugeWorkArgs) void {
-    for (0..args.iterations) |_| args.gauge.inc();
-}
-
-fn histogramWork(_: *spice.Task, args: HistogramWorkArgs) void {
-    var rng = std.Random.DefaultPrng.init(args.seed);
-    const random = rng.random();
-    for (0..args.iterations) |_| args.histogram.observe(random.float(f64) * 10.0);
-}
-
-fn timerWork(_: *spice.Task, args: TimerWorkArgs) void {
-    var rng = std.Random.DefaultPrng.init(args.seed);
-    const random = rng.random();
-    for (0..args.iterations) |_| args.timer.recordSeconds(random.float(f64));
-}
-
-fn mixedWork(_: *spice.Task, args: MixedWorkArgs) void {
-    var rng = std.Random.DefaultPrng.init(args.seed);
-    const random = rng.random();
-    const counters = args.counters[0..args.len];
-    const gauges = args.gauges[0..args.len];
-    const histograms = args.histograms[0..args.len];
-    const timers = args.timers[0..args.len];
-
-    for (0..args.iterations) |_| {
-        const idx = random.uintLessThan(usize, args.len);
-        const op = random.uintLessThan(u8, 10);
-        switch (op) {
-            0...3 => counters[idx].inc(), // 40% counter
-            4, 5 => gauges[idx].set(random.int(i64)), // 20% gauge
-            6...8 => histograms[idx].observe(random.float(f64) * 10.0), // 30% histogram
-            else => timers[idx].recordSeconds(random.float(f64)), // 10% timer
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
