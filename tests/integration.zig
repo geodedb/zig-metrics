@@ -55,10 +55,10 @@ test "smoke: prometheus export produces valid output" {
     h.observe(0.3);
 
     var buf: [8192]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try metrics.writePrometheus(&reg, fbs.writer());
+    var writer: std.Io.Writer = .fixed(&buf);
+    try metrics.writePrometheus(&reg, &writer);
 
-    const output = fbs.getWritten();
+    const output = writer.buffered();
 
     // Verify counter
     try std.testing.expect(std.mem.indexOf(u8, output, "smoke_counter 7") != null);

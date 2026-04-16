@@ -20,6 +20,21 @@ const metrics = @import("metrics");
 const tp = @import("thread_pool");
 
 // ---------------------------------------------------------------------------
+// 0.16.0 shims
+// ---------------------------------------------------------------------------
+
+fn nanoTimestampCompat() i96 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toNanoseconds();
+}
+
+fn secondsSinceEpoch() u64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    const ts = std.Io.Clock.Timestamp.now(io_inst, .real);
+    return @intCast(ts.raw.toSeconds());
+}
+
+// ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
@@ -87,12 +102,17 @@ const MixedWorkCtx = struct {
 // ---------------------------------------------------------------------------
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const stderr = std.fs.File.stderr().deprecatedWriter();
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    var stderr_buf: [8192]u8 = undefined;
+    var stderr_fw = std.Io.File.stderr().writer(io_inst, &stderr_buf);
+    const stderr = &stderr_fw.interface;
+    var stdout_buf: [65536]u8 = undefined;
+    var stdout_fw = std.Io.File.stdout().writer(io_inst, &stdout_buf);
+    const stdout = &stdout_fw.interface;
 
     // Parse optional tier filter from CLI args
     var filter_buf: [16][]const u8 = undefined;
@@ -161,8 +181,10 @@ pub fn main() !void {
         \\================================================================================
         \\
     , .{});
+    try stderr.flush();
 
     try writeJson(stdout, allocator, &results);
+    try stdout.flush();
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +196,7 @@ fn runTier(allocator: std.mem.Allocator, tier: Tier, stderr: anytype) !TierResul
     defer arena.deinit();
     const a = arena.allocator();
 
-    const tier_start = std.time.nanoTimestamp();
+    const tier_start = nanoTimestampCompat();
     var result = TierResult{
         .name = tier.name,
         .metric_count = tier.metric_count,
@@ -243,8 +265,8 @@ fn runTier(allocator: std.mem.Allocator, tier: Tier, stderr: anytype) !TierResul
     return result;
 }
 
-fn timedOut(tier_start: i128) bool {
-    const elapsed: u64 = @intCast(@max(0, std.time.nanoTimestamp() - tier_start));
+fn timedOut(tier_start: i96) bool {
+    const elapsed: u64 = @intCast(@max(0, nanoTimestampCompat() - tier_start));
     return elapsed > TIER_TIMEOUT_NS;
 }
 
@@ -270,14 +292,14 @@ fn benchRegistration(
     defer reg.deinit();
 
     const total = counter_names.len + gauge_names.len + hist_names.len + timer_names.len;
-    const start = std.time.nanoTimestamp();
+    const start = nanoTimestampCompat();
 
     for (counter_names) |name| _ = try reg.counter(name, "bench");
     for (gauge_names) |name| _ = try reg.gauge(name, "bench");
     for (hist_names) |name| _ = try reg.histogram(name, "bench", &DEFAULT_BUCKETS);
     for (timer_names) |name| _ = try reg.timer(name, "bench", &DEFAULT_BUCKETS);
 
-    const elapsed_ns: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
     return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(total));
 }
 
@@ -308,10 +330,10 @@ fn benchCounter(allocator: std.mem.Allocator, tier: Tier) !f64 {
     }
 
     var wg = pool.waitGroup();
-    const start = std.time.nanoTimestamp();
+    const start = nanoTimestampCompat();
     _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
     wg.wait();
-    const elapsed_ns: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
 
     const total_ops = tier.thread_count * tier.iterations;
     return opsPerSec(total_ops, elapsed_ns);
@@ -340,10 +362,10 @@ fn benchGauge(allocator: std.mem.Allocator, tier: Tier) !f64 {
     }
 
     var wg = pool.waitGroup();
-    const start = std.time.nanoTimestamp();
+    const start = nanoTimestampCompat();
     _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
     wg.wait();
-    const elapsed_ns: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
 
     return opsPerSec(tier.thread_count * tier.iterations, elapsed_ns);
 }
@@ -373,10 +395,10 @@ fn benchHistogram(allocator: std.mem.Allocator, tier: Tier) !f64 {
     }
 
     var wg = pool.waitGroup();
-    const start = std.time.nanoTimestamp();
+    const start = nanoTimestampCompat();
     _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
     wg.wait();
-    const elapsed_ns: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
 
     return opsPerSec(tier.thread_count * tier.iterations, elapsed_ns);
 }
@@ -406,10 +428,10 @@ fn benchTimer(allocator: std.mem.Allocator, tier: Tier) !f64 {
     }
 
     var wg = pool.waitGroup();
-    const start = std.time.nanoTimestamp();
+    const start = nanoTimestampCompat();
     _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
     wg.wait();
-    const elapsed_ns: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
 
     return opsPerSec(tier.thread_count * tier.iterations, elapsed_ns);
 }
@@ -431,12 +453,12 @@ fn benchSnapshot(
         snap.deinit();
     }
 
-    const start = std.time.nanoTimestamp();
+    const start = nanoTimestampCompat();
     for (0..SNAPSHOT_SAMPLES) |_| {
         var snap = try reg.snapshot();
         snap.deinit();
     }
-    const elapsed_ns: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
     _ = tier;
 
     return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(SNAPSHOT_SAMPLES)) / 1_000_000.0;
@@ -463,12 +485,12 @@ fn benchParallelSnapshot(
         snap.deinit();
     }
 
-    const start = std.time.nanoTimestamp();
+    const start = nanoTimestampCompat();
     for (0..SNAPSHOT_SAMPLES) |_| {
         var snap = try reg.parallelSnapshot(&pool);
         snap.deinit();
     }
-    const elapsed_ns: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
 
     return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(SNAPSHOT_SAMPLES)) / 1_000_000.0;
 }
@@ -491,16 +513,16 @@ fn benchPrometheus(
 
     // Warmup
     for (0..3) |_| {
-        var fbs = std.io.fixedBufferStream(buf);
-        try metrics.writePrometheus(&reg, fbs.writer());
+        var writer: std.Io.Writer = .fixed(buf);
+        try metrics.writePrometheus(&reg, &writer);
     }
 
-    const start = std.time.nanoTimestamp();
+    const start = nanoTimestampCompat();
     for (0..PROMETHEUS_SAMPLES) |_| {
-        var fbs = std.io.fixedBufferStream(buf);
-        try metrics.writePrometheus(&reg, fbs.writer());
+        var writer: std.Io.Writer = .fixed(buf);
+        try metrics.writePrometheus(&reg, &writer);
     }
-    const elapsed_ns: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
 
     return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(PROMETHEUS_SAMPLES)) / 1_000_000.0;
 }
@@ -573,10 +595,10 @@ fn benchMixed(
     }
 
     var wg = pool.waitGroup();
-    const start = std.time.nanoTimestamp();
+    const start = nanoTimestampCompat();
     _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
     wg.wait();
-    const elapsed_ns: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
 
     return opsPerSec(tier.thread_count * tier.iterations, elapsed_ns);
 }
@@ -664,7 +686,7 @@ fn printTierSummary(w: anytype, r: TierResult) !void {
 fn writeJson(w: anytype, allocator: std.mem.Allocator, results: []const TierResult) !void {
     _ = allocator;
     // Timestamp
-    const epoch_secs: u64 = @intCast(std.time.timestamp());
+    const epoch_secs: u64 = secondsSinceEpoch();
     const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
     const epoch_day = es.getEpochDay();
     const year_day = epoch_day.calculateYearDay();

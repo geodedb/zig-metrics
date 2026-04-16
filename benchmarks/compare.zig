@@ -82,11 +82,14 @@ const BenchmarkFile = struct {
 // ---------------------------------------------------------------------------
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    var stdout_buf: [8192]u8 = undefined;
+    var stdout_fw = std.Io.File.stdout().writer(io_inst, &stdout_buf);
+    const stdout = &stdout_fw.interface;
 
     // Parse CLI args
     var args = std.process.args();
@@ -94,10 +97,12 @@ pub fn main() !void {
 
     const baseline_path = args.next() orelse {
         try stdout.print("Usage: compare <baseline.json> <current.json> [threshold%]\n", .{});
+        try stdout.flush();
         std.process.exit(2);
     };
     const current_path = args.next() orelse {
         try stdout.print("Usage: compare <baseline.json> <current.json> [threshold%]\n", .{});
+        try stdout.flush();
         std.process.exit(2);
     };
     const threshold: f64 = if (args.next()) |t|
@@ -106,14 +111,16 @@ pub fn main() !void {
         DEFAULT_THRESHOLD;
 
     // Read and parse files
-    const baseline_data = std.fs.cwd().readFileAlloc(allocator, baseline_path, 10 * 1024 * 1024) catch |err| {
+    const baseline_data = std.Io.Dir.cwd().readFileAlloc(io_inst, baseline_path, allocator, std.Io.Limit.limited(10 * 1024 * 1024)) catch |err| {
         try stdout.print("Error reading baseline file '{s}': {}\n", .{ baseline_path, err });
+        try stdout.flush();
         std.process.exit(2);
     };
     defer allocator.free(baseline_data);
 
-    const current_data = std.fs.cwd().readFileAlloc(allocator, current_path, 10 * 1024 * 1024) catch |err| {
+    const current_data = std.Io.Dir.cwd().readFileAlloc(io_inst, current_path, allocator, std.Io.Limit.limited(10 * 1024 * 1024)) catch |err| {
         try stdout.print("Error reading current file '{s}': {}\n", .{ current_path, err });
+        try stdout.flush();
         std.process.exit(2);
     };
     defer allocator.free(current_data);
@@ -123,6 +130,7 @@ pub fn main() !void {
         .allocate = .alloc_always,
     }) catch |err| {
         try stdout.print("Error parsing baseline JSON: {}\n", .{err});
+        try stdout.flush();
         std.process.exit(2);
     };
     defer baseline.deinit();
@@ -132,6 +140,7 @@ pub fn main() !void {
         .allocate = .alloc_always,
     }) catch |err| {
         try stdout.print("Error parsing current JSON: {}\n", .{err});
+        try stdout.flush();
         std.process.exit(2);
     };
     defer current.deinit();
@@ -223,6 +232,7 @@ pub fn main() !void {
             \\================================================================================
             \\
         , .{});
+        try stdout.flush();
         std.process.exit(1);
     } else {
         try stdout.print("  Result: PASS ({d} metrics compared, 0 regressions)\n", .{total_metrics});
@@ -230,6 +240,7 @@ pub fn main() !void {
             \\================================================================================
             \\
         , .{});
+        try stdout.flush();
     }
 }
 

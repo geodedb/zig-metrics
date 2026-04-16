@@ -15,7 +15,10 @@ const std = @import("std");
 // This example uses direct imports since it's not wired into the build system.
 
 pub fn main() !void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    var buf: [4096]u8 = undefined;
+    var stdout_fw = std.Io.File.stdout().writer(io_inst, &buf);
+    const stdout = &stdout_fw.interface;
 
     try stdout.print("metrics library example\n", .{});
     try stdout.print("========================\n\n", .{});
@@ -49,4 +52,5 @@ pub fn main() !void {
 
     try stdout.print("See src/root.zig for the full public API.\n", .{});
     try stdout.print("See tests/integration.zig for working usage examples.\n", .{});
+    try stdout.flush();
 }

@@ -7,6 +7,13 @@
 //! instant. They are useful for export, comparison, and testing.
 
 const std = @import("std");
+
+/// 0.16.0 shim: std.time.nanoTimestamp() was removed. Use Io clock instead.
+fn nanoTimestampCompat() i96 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toNanoseconds();
+}
+
 const Counter = @import("counter.zig").Counter;
 const Gauge = @import("gauge.zig").Gauge;
 const Histogram = @import("histogram.zig").Histogram;
@@ -46,7 +53,7 @@ pub const Snapshot = struct {
     bucket_count_storage: []u64,
     bucket_bound_storage: []f64,
     allocator: std.mem.Allocator,
-    timestamp_ns: i128,
+    timestamp_ns: i96,
 
     pub fn deinit(self: *Snapshot) void {
         self.allocator.free(self.bucket_count_storage);
@@ -154,7 +161,7 @@ pub fn captureSnapshot(
         .bucket_count_storage = bucket_count_storage,
         .bucket_bound_storage = bucket_bound_storage,
         .allocator = allocator,
-        .timestamp_ns = std.time.nanoTimestamp(),
+        .timestamp_ns = nanoTimestampCompat(),
     };
 }
 

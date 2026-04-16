@@ -9,6 +9,37 @@
 
 const std = @import("std");
 const tp = @import("thread_pool");
+
+/// 0.16.0 shim: std.Thread.RwLock was moved to std.Io.RwLock and requires
+/// an Io instance for all lock/unlock calls. Wrap std.Io.Mutex instead to
+/// keep the Registry API Io-free. Read-vs-write distinction is sacrificed
+/// (all ops take exclusive lock) but correctness is preserved.
+const RwLockShim = struct {
+    inner: std.Io.Mutex = std.Io.Mutex.init,
+
+    fn getIo() std.Io {
+        return std.Io.Threaded.global_single_threaded.io();
+    }
+
+    pub fn lock(self: *RwLockShim) void {
+        self.inner.lockUncancelable(getIo());
+    }
+    pub fn unlock(self: *RwLockShim) void {
+        self.inner.unlock(getIo());
+    }
+    pub fn lockShared(self: *RwLockShim) void {
+        self.inner.lockUncancelable(getIo());
+    }
+    pub fn unlockShared(self: *RwLockShim) void {
+        self.inner.unlock(getIo());
+    }
+};
+/// 0.16.0 shim: std.time.nanoTimestamp() was removed. Use Io clock instead.
+fn nanoTimestampCompat() i96 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toNanoseconds();
+}
+
 const Counter = @import("counter.zig").Counter;
 const Gauge = @import("gauge.zig").Gauge;
 const Histogram = @import("histogram.zig").Histogram;
@@ -44,7 +75,7 @@ pub const Registry = struct {
     gauges: std.StringHashMap(*Gauge),
     histograms: std.StringHashMap(*Histogram),
     timers: std.StringHashMap(*Timer),
-    rwlock: std.Thread.RwLock,
+    rwlock: RwLockShim,
 
     /// Create a new empty registry.
     pub fn init(allocator: std.mem.Allocator) Registry {
@@ -419,7 +450,7 @@ pub const Registry = struct {
             .bucket_count_storage = bucket_count_storage,
             .bucket_bound_storage = bucket_bound_storage,
             .allocator = self.allocator,
-            .timestamp_ns = std.time.nanoTimestamp(),
+            .timestamp_ns = nanoTimestampCompat(),
         };
     }
 

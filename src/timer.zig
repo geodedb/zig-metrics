@@ -10,6 +10,12 @@ const std = @import("std");
 const histogram_mod = @import("histogram.zig");
 const Histogram = histogram_mod.Histogram;
 
+/// 0.16.0 shim: std.time.nanoTimestamp() was removed. Use Io clock instead.
+fn nanoTimestampCompat() i96 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toNanoseconds();
+}
+
 /// Default timer buckets (in seconds) suitable for typical latency measurements.
 pub const default_timer_buckets: []const f64 = &.{
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
@@ -43,7 +49,7 @@ pub const Timer = struct {
     pub fn start(self: *Timer) Sample {
         return .{
             .timer = self,
-            .start_ns = std.time.nanoTimestamp(),
+            .start_ns = nanoTimestampCompat(),
         };
     }
 
@@ -71,12 +77,12 @@ pub const Timer = struct {
     /// An in-flight timing measurement.
     pub const Sample = struct {
         timer: *Timer,
-        start_ns: i128,
+        start_ns: i96,
 
         /// Stop the timer and record the elapsed duration.
         /// Clamps to zero if clock moved backward (e.g., NTP correction).
         pub fn finish(self: Sample) void {
-            const end_ns = std.time.nanoTimestamp();
+            const end_ns = nanoTimestampCompat();
             const elapsed_ns = @max(0, end_ns - self.start_ns);
             const seconds: f64 = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
             self.timer.histogram.observe(seconds);
@@ -126,7 +132,8 @@ test "Timer: start/finish records elapsed time" {
 
     const sample = t.start();
     // Busy wait a tiny bit so elapsed > 0
-    std.Thread.sleep(1_000_000); // 1ms
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    io_inst.sleep(std.Io.Duration.fromNanoseconds(1_000_000), .awake) catch {}; // 1ms
     sample.finish();
 
     try std.testing.expectEqual(@as(u64, 1), t.getCount());

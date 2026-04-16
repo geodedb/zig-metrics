@@ -75,10 +75,10 @@ test "Prometheus: empty registry produces no output" {
     defer reg.deinit();
 
     var buf: [4096]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try writePrometheus(&reg, fbs.writer());
+    var writer: std.Io.Writer = .fixed(&buf);
+    try writePrometheus(&reg, &writer);
 
-    try std.testing.expectEqualStrings("", fbs.getWritten());
+    try std.testing.expectEqualStrings("", writer.buffered());
 }
 
 test "Prometheus: counter format" {
@@ -89,10 +89,10 @@ test "Prometheus: counter format" {
     c.add(42);
 
     var buf: [4096]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try writePrometheus(&reg, fbs.writer());
+    var writer: std.Io.Writer = .fixed(&buf);
+    try writePrometheus(&reg, &writer);
 
-    const output = fbs.getWritten();
+    const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "# HELP http_requests_total Total HTTP requests\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "# TYPE http_requests_total counter\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "http_requests_total 42\n") != null);
@@ -106,10 +106,10 @@ test "Prometheus: gauge format" {
     g.set(-5);
 
     var buf: [4096]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try writePrometheus(&reg, fbs.writer());
+    var writer: std.Io.Writer = .fixed(&buf);
+    try writePrometheus(&reg, &writer);
 
-    const output = fbs.getWritten();
+    const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "# TYPE temperature gauge\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "temperature -5\n") != null);
 }
@@ -125,10 +125,10 @@ test "Prometheus: histogram per-bucket cumulative output" {
     h.observe(2.0); // -> no bucket
 
     var buf: [8192]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try writePrometheus(&reg, fbs.writer());
+    var writer: std.Io.Writer = .fixed(&buf);
+    try writePrometheus(&reg, &writer);
 
-    const output = fbs.getWritten();
+    const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "# TYPE latency_seconds histogram\n") != null);
     // Per-bucket counts: [1, 1, 0]. Cumulative: le=0.1:1, le=0.5:2, le=1.0:2
     try std.testing.expect(std.mem.indexOf(u8, output, "latency_seconds_bucket{le=\"0.100000\"} 1\n") != null);
@@ -147,10 +147,10 @@ test "Prometheus: timer uses histogram format" {
     t.recordSeconds(0.05);
 
     var buf: [8192]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try writePrometheus(&reg, fbs.writer());
+    var writer: std.Io.Writer = .fixed(&buf);
+    try writePrometheus(&reg, &writer);
 
-    const output = fbs.getWritten();
+    const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "# TYPE request_duration_seconds histogram\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "request_duration_seconds_count 1\n") != null);
 }
@@ -163,10 +163,10 @@ test "Prometheus: multiple metrics in output" {
     _ = try reg.gauge("g1", "gauge one");
 
     var buf: [8192]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try writePrometheus(&reg, fbs.writer());
+    var writer: std.Io.Writer = .fixed(&buf);
+    try writePrometheus(&reg, &writer);
 
-    const output = fbs.getWritten();
+    const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "c1") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "g1") != null);
 }
