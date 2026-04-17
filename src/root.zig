@@ -65,6 +65,7 @@ pub const MetricKind = @import("snapshot.zig").MetricKind;
 /// Instance-based metrics registry (no global singletons).
 pub const Registry = @import("registry.zig").Registry;
 pub const RegistryError = @import("registry.zig").RegistryError;
+pub const RegistryOptions = @import("registry.zig").RegistryOptions;
 
 /// Thread pool structured concurrency (re-exported for consumers).
 pub const thread_pool = @import("thread_pool");

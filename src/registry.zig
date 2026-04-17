@@ -400,7 +400,11 @@ pub const Registry = struct {
             }
         }
 
-        // Task context types for the three background captures.
+        // Task context types for the background captures. Gauges stay
+        // single-task (per-gauge work is O(1)). Histograms and timers
+        // are sharded into `ceil(count / snapshot_chunk_size)` sub-tasks
+        // so large registries spread capture work across many workers
+        // rather than starving everyone but one.
         const GaugeCtx = struct {
             gauges: *std.StringHashMap(*Gauge),
             out: []snapshot_mod.MetricSnapshot,
@@ -418,66 +422,144 @@ pub const Registry = struct {
             bounds: []f64,
         };
 
-        var gauge_ctx = GaugeCtx{ .gauges = &self.gauges, .out = gauge_entries };
-        var hist_ctx = HistCtx{
-            .entries = hist_entry_list,
-            .out = hist_entries,
-            .counts = hist_bucket_counts,
-            .bounds = hist_bucket_bounds,
-        };
-        var timer_ctx = TimerCtx{
-            .entries = timer_entry_list,
-            .out = timer_entries,
-            .counts = timer_bucket_counts,
-            .bounds = timer_bucket_bounds,
-        };
+        // Treat chunk==0 as "no sharding" (collapse to a single task per
+        // type) so a caller that sets snapshot_chunk_size=0 gets safe
+        // behavior rather than a division-by-zero.
+        const chunk = if (self.options.snapshot_chunk_size == 0) std.math.maxInt(usize) else self.options.snapshot_chunk_size;
+        // Preserve the pre-sharding invariant: always emit one task per
+        // metric type (gauges, histograms, timers) even when that type
+        // is empty. This keeps the submitted-count predictable for
+        // instrumentation and lets the existing parallelSnapshot fan-out
+        // ordering guarantees hold. Histograms and timers may sub-divide
+        // further based on `chunk`.
+        const hist_chunks: usize = if (hist_count == 0) 1 else (hist_count + chunk - 1) / chunk;
+        const timer_chunks: usize = if (timer_count == 0) 1 else (timer_count + chunk - 1) / chunk;
+        const gauge_tasks: usize = 1;
+        const total_tasks = gauge_tasks + hist_chunks + timer_chunks;
 
-        // Fan-out gauges, histograms, timers to the thread pool.
+        // Stack-vs-heap task buffer. MAX_STACK_TASKS = 32 covers the
+        // common case (thousands of metrics at chunk_size=64 stay under
+        // 32 shards per type). Above that, fall back to a heap buffer.
+        const MAX_STACK_TASKS = 32;
+        var tasks_stack: [MAX_STACK_TASKS]tp.BatchTask = undefined;
+        var hist_ctx_stack: [MAX_STACK_TASKS]HistCtx = undefined;
+        var timer_ctx_stack: [MAX_STACK_TASKS]TimerCtx = undefined;
+
+        const tasks: []tp.BatchTask = if (total_tasks <= MAX_STACK_TASKS)
+            tasks_stack[0..total_tasks]
+        else
+            self.allocator.alloc(tp.BatchTask, total_tasks) catch return error.OutOfMemory;
+        defer if (total_tasks > MAX_STACK_TASKS) self.allocator.free(tasks);
+
+        const hist_ctxs: []HistCtx = if (hist_chunks <= MAX_STACK_TASKS)
+            hist_ctx_stack[0..hist_chunks]
+        else
+            self.allocator.alloc(HistCtx, hist_chunks) catch return error.OutOfMemory;
+        defer if (hist_chunks > MAX_STACK_TASKS) self.allocator.free(hist_ctxs);
+
+        const timer_ctxs: []TimerCtx = if (timer_chunks <= MAX_STACK_TASKS)
+            timer_ctx_stack[0..timer_chunks]
+        else
+            self.allocator.alloc(TimerCtx, timer_chunks) catch return error.OutOfMemory;
+        defer if (timer_chunks > MAX_STACK_TASKS) self.allocator.free(timer_ctxs);
+
+        var gauge_ctx = GaugeCtx{ .gauges = &self.gauges, .out = gauge_entries };
+
+        const gauge_run = struct {
+            fn run(ctx: *anyopaque, _: *tp.TaskContext) void {
+                const c: *GaugeCtx = @ptrCast(@alignCast(ctx));
+                var iter = c.gauges.iterator();
+                var idx: usize = 0;
+                while (iter.next()) |entry| {
+                    const g = entry.value_ptr.*;
+                    c.out[idx] = .{
+                        .name = g.name,
+                        .help = g.help,
+                        .kind = .gauge,
+                        .gauge_value = g.get(),
+                    };
+                    idx += 1;
+                }
+            }
+        }.run;
+
+        const hist_run = struct {
+            fn run(ctx: *anyopaque, _: *tp.TaskContext) void {
+                const c: *HistCtx = @ptrCast(@alignCast(ctx));
+                captureHistSlice(c.entries, c.out, c.counts, c.bounds, .histogram);
+            }
+        }.run;
+
+        const timer_run = struct {
+            fn run(ctx: *anyopaque, _: *tp.TaskContext) void {
+                const c: *TimerCtx = @ptrCast(@alignCast(ctx));
+                captureTimerSlice(c.entries, c.out, c.counts, c.bounds);
+            }
+        }.run;
+
+        var task_idx: usize = 0;
+        tasks[task_idx] = .{ .task_fn = gauge_run, .ctx = &gauge_ctx };
+        task_idx += 1;
+
+        // Build histogram shard contexts. Each shard gets a disjoint
+        // slice of hist_entry_list, a disjoint sub-slice of the output
+        // MetricSnapshot entries, and a disjoint sub-slice of the
+        // counts/bounds storage (sized to the sum of bucket lengths
+        // for the histograms in this shard).
+        {
+            var entry_off: usize = 0;
+            var bucket_off: usize = 0;
+            var shard: usize = 0;
+            while (shard < hist_chunks) : (shard += 1) {
+                const shard_end = @min(entry_off + chunk, hist_count);
+                const shard_entries = hist_entry_list[entry_off..shard_end];
+                // Sum bucket lengths for this shard.
+                var shard_buckets: usize = 0;
+                for (shard_entries) |e| shard_buckets += e.hist.buckets.len;
+                hist_ctxs[shard] = .{
+                    .entries = shard_entries,
+                    .out = hist_entries[entry_off..shard_end],
+                    .counts = hist_bucket_counts[bucket_off .. bucket_off + shard_buckets],
+                    .bounds = hist_bucket_bounds[bucket_off .. bucket_off + shard_buckets],
+                };
+                tasks[task_idx] = .{ .task_fn = hist_run, .ctx = &hist_ctxs[shard] };
+                task_idx += 1;
+                entry_off = shard_end;
+                bucket_off += shard_buckets;
+            }
+        }
+
+        // Build timer shard contexts (same sharding strategy as hist).
+        {
+            var entry_off: usize = 0;
+            var bucket_off: usize = 0;
+            var shard: usize = 0;
+            while (shard < timer_chunks) : (shard += 1) {
+                const shard_end = @min(entry_off + chunk, timer_count);
+                const shard_entries = timer_entry_list[entry_off..shard_end];
+                var shard_buckets: usize = 0;
+                for (shard_entries) |e| shard_buckets += e.timer.histogram.buckets.len;
+                timer_ctxs[shard] = .{
+                    .entries = shard_entries,
+                    .out = timer_entries[entry_off..shard_end],
+                    .counts = timer_bucket_counts[bucket_off .. bucket_off + shard_buckets],
+                    .bounds = timer_bucket_bounds[bucket_off .. bucket_off + shard_buckets],
+                };
+                tasks[task_idx] = .{ .task_fn = timer_run, .ctx = &timer_ctxs[shard] };
+                task_idx += 1;
+                entry_off = shard_end;
+                bucket_off += shard_buckets;
+            }
+        }
+
+        // Fan-out gauges, histogram-shards, timer-shards to the thread
+        // pool. `wg` ensures the worker captures complete before we
+        // return the snapshot.
         var wg = pool.waitGroup();
-        const tasks = [_]tp.BatchTask{
-            .{
-                .task_fn = struct {
-                    fn run(ctx: *anyopaque, _: *tp.TaskContext) void {
-                        const c: *GaugeCtx = @ptrCast(@alignCast(ctx));
-                        var iter = c.gauges.iterator();
-                        var idx: usize = 0;
-                        while (iter.next()) |entry| {
-                            const g = entry.value_ptr.*;
-                            c.out[idx] = .{
-                                .name = g.name,
-                                .help = g.help,
-                                .kind = .gauge,
-                                .gauge_value = g.get(),
-                            };
-                            idx += 1;
-                        }
-                    }
-                }.run,
-                .ctx = &gauge_ctx,
-            },
-            .{
-                .task_fn = struct {
-                    fn run(ctx: *anyopaque, _: *tp.TaskContext) void {
-                        const c: *HistCtx = @ptrCast(@alignCast(ctx));
-                        captureHistSlice(c.entries, c.out, c.counts, c.bounds, .histogram);
-                    }
-                }.run,
-                .ctx = &hist_ctx,
-            },
-            .{
-                .task_fn = struct {
-                    fn run(ctx: *anyopaque, _: *tp.TaskContext) void {
-                        const c: *TimerCtx = @ptrCast(@alignCast(ctx));
-                        captureTimerSlice(c.entries, c.out, c.counts, c.bounds);
-                    }
-                }.run,
-                .ctx = &timer_ctx,
-            },
-        };
         // Propagate the real thread-pool error (ShutdownInProgress,
         // QueueFull, etc.) instead of masking it as OutOfMemory. See the
         // parallelSnapshot doc comment for the full inferred error set.
-        _ = try pool.submitBatch(&tasks, .{ .wait_group = &wg });
+        _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
 
         // Capture counters on the calling thread while workers run.
         {

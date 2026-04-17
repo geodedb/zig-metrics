@@ -214,3 +214,42 @@ test "thread_pool: parallel snapshot captures consistent data" {
     try std.testing.expectEqual(@as(u64, 2), hs.hist_count);
     try std.testing.expectApproxEqAbs(@as(f64, 5.5), hs.hist_sum, 1e-10);
 }
+
+test "thread_pool: parallelSnapshot shards histograms when count > chunk_size" {
+    var pool = try tp.ThreadPool.init(std.testing.allocator, .{ .max_threads = 4 });
+    defer pool.deinit();
+
+    var reg = metrics.Registry.initWithOptions(std.testing.allocator, .{ .snapshot_chunk_size = 4 });
+    defer reg.deinit();
+
+    // Register 16 histograms → expect ceil(16/4) = 4 histogram sub-tasks.
+    const buckets = [_]f64{ 1.0, 10.0, 100.0 };
+    inline for (0..16) |i| {
+        const name = std.fmt.comptimePrint("h_{d}", .{i});
+        const h = try reg.histogram(name, "help", &buckets);
+        // Observe at least once so the snapshot has non-trivial data
+        // and the capture loop actually runs through every bucket.
+        h.observe(@floatFromInt(i + 1));
+    }
+
+    const before = pool.statsSnapshot().submitted;
+    var snap = try reg.parallelSnapshot(&pool);
+    defer snap.deinit();
+    const after = pool.statsSnapshot().submitted;
+
+    // 1 gauge-task + 4 hist-shards + 1 timer-task (timer count 0 → 0
+    // tasks). Minimum is 1 + 4 + 0 = 5; the implementation may emit
+    // >= 5 depending on whether zero-count types are elided. The
+    // baseline (pre-sharding) only submits 3 tasks total.
+    try std.testing.expect(after - before >= 5);
+
+    // Snapshot content sanity: all 16 histograms must be captured with
+    // the observed values preserved.
+    try std.testing.expectEqual(@as(usize, 16), snap.len());
+    inline for (0..16) |i| {
+        const name = std.fmt.comptimePrint("h_{d}", .{i});
+        const hs = snap.get(name) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u64, 1), hs.hist_count);
+        try std.testing.expectApproxEqAbs(@as(f64, @floatFromInt(i + 1)), hs.hist_sum, 1e-10);
+    }
+}
