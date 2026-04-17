@@ -377,19 +377,42 @@ pub const Registry = struct {
         const timer_bucket_counts = bucket_count_storage[hist_bucket_total..bucket_total];
         const timer_bucket_bounds = bucket_bound_storage[hist_bucket_total..bucket_total];
 
+        // Pre-materialize (name-less) slices of metric pointers for
+        // histograms and timers so that per-task capture can index in
+        // directly without walking the StringHashMap on the worker. This
+        // also lets us shard the slice in a follow-up change.
+        const hist_entry_list = self.allocator.alloc(HistEntry, hist_count) catch return error.OutOfMemory;
+        defer self.allocator.free(hist_entry_list);
+        const timer_entry_list = self.allocator.alloc(TimerEntry, timer_count) catch return error.OutOfMemory;
+        defer self.allocator.free(timer_entry_list);
+        {
+            var iter = self.histograms.iterator();
+            var i: usize = 0;
+            while (iter.next()) |kv| : (i += 1) {
+                hist_entry_list[i] = .{ .hist = kv.value_ptr.* };
+            }
+        }
+        {
+            var iter = self.timers.iterator();
+            var i: usize = 0;
+            while (iter.next()) |kv| : (i += 1) {
+                timer_entry_list[i] = .{ .timer = kv.value_ptr.* };
+            }
+        }
+
         // Task context types for the three background captures.
         const GaugeCtx = struct {
             gauges: *std.StringHashMap(*Gauge),
             out: []snapshot_mod.MetricSnapshot,
         };
         const HistCtx = struct {
-            histograms: *std.StringHashMap(*Histogram),
+            entries: []const HistEntry,
             out: []snapshot_mod.MetricSnapshot,
             counts: []u64,
             bounds: []f64,
         };
         const TimerCtx = struct {
-            timers: *std.StringHashMap(*Timer),
+            entries: []const TimerEntry,
             out: []snapshot_mod.MetricSnapshot,
             counts: []u64,
             bounds: []f64,
@@ -397,13 +420,13 @@ pub const Registry = struct {
 
         var gauge_ctx = GaugeCtx{ .gauges = &self.gauges, .out = gauge_entries };
         var hist_ctx = HistCtx{
-            .histograms = &self.histograms,
+            .entries = hist_entry_list,
             .out = hist_entries,
             .counts = hist_bucket_counts,
             .bounds = hist_bucket_bounds,
         };
         var timer_ctx = TimerCtx{
-            .timers = &self.timers,
+            .entries = timer_entry_list,
             .out = timer_entries,
             .counts = timer_bucket_counts,
             .bounds = timer_bucket_bounds,
@@ -436,7 +459,7 @@ pub const Registry = struct {
                 .task_fn = struct {
                     fn run(ctx: *anyopaque, _: *tp.TaskContext) void {
                         const c: *HistCtx = @ptrCast(@alignCast(ctx));
-                        captureHistType(c.histograms, c.out, c.counts, c.bounds, .histogram);
+                        captureHistSlice(c.entries, c.out, c.counts, c.bounds, .histogram);
                     }
                 }.run,
                 .ctx = &hist_ctx,
@@ -445,7 +468,7 @@ pub const Registry = struct {
                 .task_fn = struct {
                     fn run(ctx: *anyopaque, _: *tp.TaskContext) void {
                         const c: *TimerCtx = @ptrCast(@alignCast(ctx));
-                        captureTimerType(c.timers, c.out, c.counts, c.bounds);
+                        captureTimerSlice(c.entries, c.out, c.counts, c.bounds);
                     }
                 }.run,
                 .ctx = &timer_ctx,
@@ -483,18 +506,24 @@ pub const Registry = struct {
         };
     }
 
-    fn captureHistType(
-        histograms: *std.StringHashMap(*Histogram),
+    /// Lightweight view into a registered histogram. Materialised once
+    /// up-front in `parallelSnapshot` so worker tasks can operate on a
+    /// flat slice rather than traversing the StringHashMap.
+    const HistEntry = struct { hist: *Histogram };
+
+    /// Lightweight view into a registered timer. See `HistEntry`.
+    const TimerEntry = struct { timer: *Timer };
+
+    fn captureHistSlice(
+        entries: []const HistEntry,
         out: []snapshot_mod.MetricSnapshot,
         counts: []u64,
         bounds: []f64,
         kind: snapshot_mod.MetricKind,
     ) void {
-        var iter = histograms.iterator();
-        var idx: usize = 0;
         var offset: usize = 0;
-        while (iter.next()) |entry| {
-            const h = entry.value_ptr.*;
+        for (entries, 0..) |e, idx| {
+            const h = e.hist;
             const blen = h.buckets.len;
             const count_slice = counts[offset .. offset + blen];
             const bound_slice = bounds[offset .. offset + blen];
@@ -511,22 +540,19 @@ pub const Registry = struct {
                 .hist_buckets = bound_slice,
                 .hist_bucket_counts = count_slice,
             };
-            idx += 1;
             offset += blen;
         }
     }
 
-    fn captureTimerType(
-        timers: *std.StringHashMap(*Timer),
+    fn captureTimerSlice(
+        entries: []const TimerEntry,
         out: []snapshot_mod.MetricSnapshot,
         counts: []u64,
         bounds: []f64,
     ) void {
-        var iter = timers.iterator();
-        var idx: usize = 0;
         var offset: usize = 0;
-        while (iter.next()) |entry| {
-            const t = entry.value_ptr.*;
+        for (entries, 0..) |e, idx| {
+            const t = e.timer;
             const h = &t.histogram;
             const blen = h.buckets.len;
             const count_slice = counts[offset .. offset + blen];
@@ -544,7 +570,6 @@ pub const Registry = struct {
                 .hist_buckets = bound_slice,
                 .hist_bucket_counts = count_slice,
             };
-            idx += 1;
             offset += blen;
         }
     }
