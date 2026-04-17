@@ -65,6 +65,16 @@ pub const RegistryError = error{
     NonFiniteBucket,
 };
 
+/// Tuning knobs for Registry behavior.
+pub const RegistryOptions = struct {
+    /// In `parallelSnapshot`, subdivide histograms/timers into
+    /// `ceil(count / snapshot_chunk_size)` sub-tasks. Default 64 is
+    /// chosen empirically: above this, the per-task overhead is dwarfed
+    /// by per-metric bucket-copy cost. Lower values distribute work
+    /// across more workers at the cost of more per-task bookkeeping.
+    snapshot_chunk_size: usize = 64,
+};
+
 /// An instance-based metrics registry.
 ///
 /// Owns all registered metrics and provides thread-safe access.
@@ -76,9 +86,15 @@ pub const Registry = struct {
     histograms: std.StringHashMap(*Histogram),
     timers: std.StringHashMap(*Timer),
     rwlock: RwLockShim,
+    options: RegistryOptions = .{},
 
-    /// Create a new empty registry.
+    /// Create a new empty registry with default options.
     pub fn init(allocator: std.mem.Allocator) Registry {
+        return initWithOptions(allocator, .{});
+    }
+
+    /// Create a new empty registry with explicit tuning options.
+    pub fn initWithOptions(allocator: std.mem.Allocator, options: RegistryOptions) Registry {
         return .{
             .allocator = allocator,
             .counters = std.StringHashMap(*Counter).init(allocator),
@@ -86,6 +102,7 @@ pub const Registry = struct {
             .histograms = std.StringHashMap(*Histogram).init(allocator),
             .timers = std.StringHashMap(*Timer).init(allocator),
             .rwlock = .{},
+            .options = options,
         };
     }
 
