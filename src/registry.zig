@@ -310,7 +310,16 @@ pub const Registry = struct {
     /// on a separate worker thread when workers are available.
     ///
     /// Requires an initialised thread-pool.
-    pub fn parallelSnapshot(self: *Registry, pool: *tp.ThreadPool) error{OutOfMemory}!Snapshot {
+    ///
+    /// Errors: `OutOfMemory` from the pre-allocation phase, or any error
+    /// that `tp.ThreadPool.submitBatch` can return (e.g.
+    /// `error.ShutdownInProgress`, `error.QueueFull`, `error.Timeout`,
+    /// `error.TaskPoolExhausted`, `error.BuildOptionMismatch`). The error
+    /// set is inferred from the implementation so callers see the actual
+    /// failure rather than a coerced `OutOfMemory` — a shutting-down
+    /// pool looks nothing like an allocator failure and should not be
+    /// triaged as one.
+    pub fn parallelSnapshot(self: *Registry, pool: *tp.ThreadPool) !Snapshot {
         self.rwlock.lockShared();
         defer self.rwlock.unlockShared();
 
@@ -425,7 +434,10 @@ pub const Registry = struct {
                 .ctx = &timer_ctx,
             },
         };
-        _ = pool.submitBatch(&tasks, .{ .wait_group = &wg }) catch return error.OutOfMemory;
+        // Propagate the real thread-pool error (ShutdownInProgress,
+        // QueueFull, etc.) instead of masking it as OutOfMemory. See the
+        // parallelSnapshot doc comment for the full inferred error set.
+        _ = try pool.submitBatch(&tasks, .{ .wait_group = &wg });
 
         // Capture counters on the calling thread while workers run.
         {
