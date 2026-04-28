@@ -76,6 +76,18 @@ pub const prometheus = @import("prometheus.zig");
 /// Write all metrics from a registry in Prometheus text exposition format.
 pub const writePrometheus = prometheus.writePrometheus;
 
+/// otel observability seam. When `-Dwith_otel=false` (the default), every
+/// function in this namespace collapses to a comptime no-op and no otel
+/// symbols are emitted. When `-Dwith_otel=true`, calls forward into the
+/// `otel` package. metrics itself does not call the seam — instrumenting
+/// individual counter/gauge/histogram increments would be too high-volume
+/// and would create a feedback loop, since otel depends on metrics under
+/// `-Dotel_use_devnw_metrics=true`. The seam is exposed for forward
+/// compatibility and so embedders can wire observability around their own
+/// metric mutation call sites. See `src/observability.zig` and the README's
+/// "Observability" section for details.
+pub const observability = @import("observability.zig");
+
 // ============================================================================
 // Unit Tests - ensure all submodules are referenced
 // ============================================================================

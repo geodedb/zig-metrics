@@ -7,6 +7,32 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // -Dwith_otel=<bool> compiles in the otel observability seam. When
+    // false (the default), the otel dependency is never resolved and no
+    // otel symbols are imported — the verifier
+    // `otel/scripts/verify-consumer-noop.sh` confirms zero
+    // `otel`/`observability` symbols leak into the disabled-build
+    // artifacts. metrics is build-flag-only: the seam exists for forward
+    // compatibility and consumer wiring, but no metrics source file
+    // calls into it (instrumenting counter/gauge/histogram increments
+    // would be too high-volume and would create a feedback loop, since
+    // otel itself depends on metrics under `-Dotel_use_devnw_metrics=true`).
+    const with_otel = b.option(
+        bool,
+        "with_otel",
+        "Compile in otel instrumentation (off by default; zero overhead when off)",
+    ) orelse false;
+
+    // Shared `build_options` module surfaced as `@import("build_options")`
+    // in src/observability.zig (and src/root.zig's gated
+    // `observability_init` import). Reaching the same source file via
+    // two distinct module instances is a hard compile error in Zig, so
+    // every artifact that touches the seam (the metrics module, every
+    // test, the check step) reuses this single instance.
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "with_otel", with_otel);
+    const build_options_module = build_options.createModule();
+
     // Thread pool dependency (structured concurrency)
     const tp_dep = b.dependency("thread_pool", .{
         .target = target,
@@ -21,8 +47,26 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "thread_pool", .module = tp_module },
+            .{ .name = "build_options", .module = build_options_module },
         },
     });
+
+    // When -Dwith_otel=true, resolve the otel dependency lazily and
+    // surface it to the metrics module so `src/observability.zig` can
+    // pull `@import("otel")`. The lazy() call only triggers a fetch when
+    // the flag is true; the disabled build never reaches the dependency
+    // resolver, so the otel package never shows up on disk. metrics
+    // itself does not call any seam function — the seam is exposed for
+    // consumer-side wiring and forward compatibility.
+    const otel_module: ?*std.Build.Module = if (with_otel) blk: {
+        const otel_dep = b.lazyDependency("otel", .{
+            .target = target,
+            .optimize = optimize,
+        }) orelse break :blk null;
+        const m = otel_dep.module("otel");
+        module.addImport("otel", m);
+        break :blk m;
+    } else null;
 
     // Unit tests (run tests defined in the module itself)
     const test_step = b.step("test", "Run unit tests");
@@ -33,11 +77,33 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "thread_pool", .module = tp_module },
+                .{ .name = "build_options", .module = build_options_module },
             },
         }),
     });
+    if (otel_module) |om| unit_tests.root_module.addImport("otel", om);
     const run_unit_tests = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_unit_tests.step);
+
+    // Observability disabled-no-op test. Asserts the with_otel flag
+    // exists and defaults to false, that observability.enabled tracks
+    // it, and that the seam's no-op fallbacks compile cleanly. Wired
+    // into the default `test` step so a plain `zig build test` exercises
+    // it without an extra invocation.
+    const observability_disabled_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/observability_disabled_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "metrics", .module = module },
+                .{ .name = "build_options", .module = build_options_module },
+            },
+        }),
+    });
+    if (otel_module) |om| observability_disabled_tests.root_module.addImport("otel", om);
+    const run_observability_disabled_tests = b.addRunArtifact(observability_disabled_tests);
+    test_step.dependOn(&run_observability_disabled_tests.step);
 
     // Integration tests (separate test file with module import)
     const integration_step = b.step("test-integration", "Run integration tests");
@@ -113,8 +179,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "thread_pool", .module = tp_module },
+                .{ .name = "build_options", .module = build_options_module },
             },
         }),
     });
+    if (otel_module) |om| check.root_module.addImport("otel", om);
     check_step.dependOn(&check.step);
 }
