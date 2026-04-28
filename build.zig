@@ -51,13 +51,26 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Named `observability` module — exposed both as a re-export from
+    // src/root.zig (`metrics.observability`) AND as a standalone named
+    // module so consumers can `dep.module("observability")` directly if
+    // they prefer the seam without pulling in the rest of metrics. Per
+    // the otel rollout RECIPE the named-module pattern is required.
+    const observability_module = b.addModule("observability", .{
+        .root_source_file = b.path("src/observability.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    observability_module.addImport("build_options", build_options_module);
+
     // When -Dwith_otel=true, resolve the otel dependency lazily and
-    // surface it to the metrics module so `src/observability.zig` can
-    // pull `@import("otel")`. The lazy() call only triggers a fetch when
-    // the flag is true; the disabled build never reaches the dependency
-    // resolver, so the otel package never shows up on disk. metrics
-    // itself does not call any seam function — the seam is exposed for
-    // consumer-side wiring and forward compatibility.
+    // surface it to both the metrics module and the standalone
+    // observability module so `src/observability.zig` can pull
+    // `@import("otel")` from either entry point. The lazy() call only
+    // triggers a fetch when the flag is true; the disabled build never
+    // reaches the dependency resolver, so the otel package never shows
+    // up on disk. metrics itself does not call any seam function — the
+    // seam is exposed for consumer-side wiring and forward compatibility.
     const otel_module: ?*std.Build.Module = if (with_otel) blk: {
         const otel_dep = b.lazyDependency("otel", .{
             .target = target,
@@ -65,6 +78,7 @@ pub fn build(b: *std.Build) void {
         }) orelse break :blk null;
         const m = otel_dep.module("otel");
         module.addImport("otel", m);
+        observability_module.addImport("otel", m);
         break :blk m;
     } else null;
 

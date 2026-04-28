@@ -90,6 +90,55 @@ make dev
 make ci
 ```
 
+## Observability
+
+`metrics` carries an opt-in OpenTelemetry seam exposed at
+`metrics.observability` (and a bootstrap helper at
+`metrics.observability_init`). It is **off by default**; building or
+depending on `metrics` without any extra flags emits zero
+otel/observability symbols and never resolves the otel package.
+
+To compile in the seam:
+
+```sh
+zig build test -Dwith_otel=true
+# or, when consuming metrics as a dependency:
+zig build -Dwith_otel=true
+```
+
+When the flag is on, the otel package is fetched lazily from the pinned
+SHA in `build.zig.zon` (`.otel`). When it is off, the verifier
+`otel/scripts/verify-consumer-noop.sh` confirms no
+`otel`/`observability` symbols leak into the metrics build artifacts.
+
+**`metrics` is build-flag-only — instrumenting individual counter
+increments would be too high-volume and could create feedback loops.**
+Counter, gauge, histogram, and timer mutations happen on hot paths
+where adding a span emit per increment would (a) explode telemetry
+volume far beyond anything useful, and (b) form an observability cycle,
+since `otel` itself depends on `metrics` under
+`-Dotel_use_devnw_metrics=true`. The cycle is broken at build time
+because both edges are lazy: `otel`'s `metrics` edge is only walked
+when the operator opts into the devnw aggregation registry, and
+`metrics`'s `otel` edge is only walked when `-Dwith_otel=true`. Neither
+default-flag build resolves the other.
+
+The seam is exposed for two reasons:
+
+1. **Forward compatibility**: a future metrics operation with a natural
+   span surface (e.g. a registry-wide flush, an exporter handshake) can
+   call into the seam without re-plumbing the package manifest, build
+   flags, or symbol surface.
+2. **Consumer wiring**: applications that embed `metrics` inside an
+   OpenTelemetry-aware service can use `metrics.observability` to
+   instrument their own metric mutation call sites with the same
+   conventions and helpers the rest of the devnw/zig stack uses.
+
+See `src/observability.zig` for the seam surface and
+`src/observability_init.zig` for the bootstrap helper. The integration
+recipe lives at `otel/docs/integration/RECIPE.md` in the otel
+repository.
+
 ## Documentation
 
 See the [docs](docs/) directory for detailed documentation.
