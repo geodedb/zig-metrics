@@ -105,6 +105,26 @@ pub fn build(b: *std.Build) void {
     const run_observability_disabled_tests = b.addRunArtifact(observability_disabled_tests);
     test_step.dependOn(&run_observability_disabled_tests.step);
 
+    // Observability enabled-mode smoke test. Skips when -Dwith_otel=false
+    // (the default) and asserts the in-memory recorder captures exactly
+    // one span when -Dwith_otel=true. Wired into the default `test` step
+    // so the same `zig build test -Dwith_otel=true` invocation that
+    // builds the enabled tree also runs this assertion.
+    const observability_enabled_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/observability_enabled_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "metrics", .module = module },
+                .{ .name = "build_options", .module = build_options_module },
+            },
+        }),
+    });
+    if (otel_module) |om| observability_enabled_tests.root_module.addImport("otel", om);
+    const run_observability_enabled_tests = b.addRunArtifact(observability_enabled_tests);
+    test_step.dependOn(&run_observability_enabled_tests.step);
+
     // Integration tests (separate test file with module import)
     const integration_step = b.step("test-integration", "Run integration tests");
     const integration_tests = b.addTest(.{
