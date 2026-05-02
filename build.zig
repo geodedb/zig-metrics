@@ -17,11 +17,7 @@ pub fn build(b: *std.Build) void {
     // calls into it (instrumenting counter/gauge/histogram increments
     // would be too high-volume and would create a feedback loop, since
     // otel itself depends on metrics under `-Dotel_use_devnw_metrics=true`).
-    const with_otel = b.option(
-        bool,
-        "with_otel",
-        "Compile in otel instrumentation (off by default; zero overhead when off)",
-    ) orelse false;
+    const with_otel = false; // 2026-05-02: hardcoded after removing the lazy otel dep — see build.zig.zon header note.
 
     // Shared `build_options` module surfaced as `@import("build_options")`
     // in src/observability.zig (and src/root.zig's gated
