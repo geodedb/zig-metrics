@@ -30,9 +30,21 @@ pub fn main() !void {
     try w.print("Iterations: {d} per thread\n", .{BENCH_ITERATIONS});
     try w.print("Samples:    {d}\n\n", .{SAMPLE_RUNS});
 
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // P-012: this binary builds at the user's -Doptimize (Debug by
+    // default), and the metrics module it imports shares that mode.
+    // Debug-mode numbers are not representative — warn loudly.
+    if (@import("builtin").mode == .Debug) {
+        var stderr_buf: [256]u8 = undefined;
+        var stderr_fw = std.Io.File.stderr().writer(io_inst, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("WARNING: Debug build — pass -Doptimize=ReleaseFast for valid numbers\n", .{});
+        try stderr.flush();
+    }
+
+    // P-013: DebugAllocator's per-allocation bookkeeping inflates
+    // snapshot/registration costs and benchmark variance. smp_allocator
+    // is the production-grade thread-safe allocator.
+    const allocator = std.heap.smp_allocator;
 
     // Create a shared thread pool for all benchmarks
     var pool = try tp.ThreadPool.init(allocator, .{});

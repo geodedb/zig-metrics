@@ -185,6 +185,24 @@ pub fn build(b: *std.Build) void {
     const run_bench = b.addRunArtifact(bench_exe);
     bench_step.dependOn(&run_bench.step);
 
+    // P-012: benchmarks must measure ReleaseFast library code regardless
+    // of the user's -Doptimize. Dedicated module instances; the test and
+    // check artifacts keep using the user-optimize `module`.
+    const tp_dep_fast = b.dependency("thread_pool", .{
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    const tp_module_fast = tp_dep_fast.module("thread_pool");
+    const metrics_module_fast = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "thread_pool", .module = tp_module_fast },
+            .{ .name = "build_options", .module = build_options_module },
+        },
+    });
+
     // Scale benchmark (multi-tier performance suite with JSON output)
     const scale_bench_step = b.step("scale-bench", "Run multi-tier scale benchmark");
     const scale_bench_exe = b.addExecutable(.{
@@ -194,8 +212,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
-                .{ .name = "metrics", .module = module },
-                .{ .name = "thread_pool", .module = tp_module },
+                .{ .name = "metrics", .module = metrics_module_fast },
+                .{ .name = "thread_pool", .module = tp_module_fast },
             },
         }),
     });

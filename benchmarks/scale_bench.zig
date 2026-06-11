@@ -97,9 +97,10 @@ const MixedWorkCtx = struct {
 // ---------------------------------------------------------------------------
 
 pub fn main(init: std.process.Init) !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // P-013: DebugAllocator's per-allocation bookkeeping inflates
+    // snapshot/registration costs and benchmark variance. smp_allocator
+    // is the production-grade thread-safe allocator.
+    const allocator = std.heap.smp_allocator;
 
     const io_inst = std.Io.Threaded.global_single_threaded.io();
     var stderr_buf: [8192]u8 = undefined;
