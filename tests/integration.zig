@@ -339,3 +339,29 @@ test "thread_pool: parallelSnapshot never returns garbage entries under pool sat
         try std.testing.expect(successes > 0);
     }
 }
+
+test "registry owns name/help copies; caller may free originals (S-017)" {
+    const allocator = std.testing.allocator;
+    var reg = metrics.Registry.init(allocator);
+    defer reg.deinit();
+
+    // Heap-allocate name/help, register, then free the originals.
+    const name = try std.fmt.allocPrint(allocator, "heap_{s}_total", .{"requests"});
+    const help = try std.fmt.allocPrint(allocator, "help text {d}", .{42});
+    const c = try reg.counter(name, help);
+    c.add(7);
+    allocator.free(name);
+    allocator.free(help);
+
+    // Lookup by a fresh equal-content key must still work, and the
+    // stored name/help must read back correctly (no dangling slices).
+    const found = reg.getCounter("heap_requests_total") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 7), found.get());
+    try std.testing.expectEqualStrings("heap_requests_total", found.name);
+    try std.testing.expectEqualStrings("help text 42", found.help);
+
+    var buf: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try metrics.writePrometheus(&reg, &writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "heap_requests_total 7\n") != null);
+}

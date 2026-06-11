@@ -6,6 +6,11 @@
 //! The Registry owns and manages the lifecycle of all registered metrics.
 //! It is fully instance-based with no global state (MET-REQ-004).
 //! Thread-safe for concurrent registration and collection.
+//!
+//! Ownership: the Registry copies metric `name`/`help` strings into its
+//! own allocator at registration time; callers may free their buffers
+//! immediately after registering (S-017). Histogram/timer bucket slices
+//! are still borrowed and must outlive the Registry.
 
 const std = @import("std");
 const tp = @import("thread_pool");
@@ -111,29 +116,41 @@ pub const Registry = struct {
         self.rwlock.lock();
         defer self.rwlock.unlock();
 
-        var counter_iter = self.counters.valueIterator();
-        while (counter_iter.next()) |c| {
-            self.allocator.destroy(c.*);
+        var counter_iter = self.counters.iterator();
+        while (counter_iter.next()) |kv| {
+            const c = kv.value_ptr.*;
+            self.allocator.free(c.help);
+            self.allocator.destroy(c);
+            self.allocator.free(kv.key_ptr.*); // owned name (== c.name)
         }
         self.counters.deinit();
 
-        var gauge_iter = self.gauges.valueIterator();
-        while (gauge_iter.next()) |g| {
-            self.allocator.destroy(g.*);
+        var gauge_iter = self.gauges.iterator();
+        while (gauge_iter.next()) |kv| {
+            const g = kv.value_ptr.*;
+            self.allocator.free(g.help);
+            self.allocator.destroy(g);
+            self.allocator.free(kv.key_ptr.*); // owned name (== g.name)
         }
         self.gauges.deinit();
 
-        var hist_iter = self.histograms.valueIterator();
-        while (hist_iter.next()) |h| {
-            h.*.deinit();
-            self.allocator.destroy(h.*);
+        var hist_iter = self.histograms.iterator();
+        while (hist_iter.next()) |kv| {
+            const h = kv.value_ptr.*;
+            self.allocator.free(h.help);
+            h.deinit();
+            self.allocator.destroy(h);
+            self.allocator.free(kv.key_ptr.*); // owned name (== h.name)
         }
         self.histograms.deinit();
 
-        var timer_iter = self.timers.valueIterator();
-        while (timer_iter.next()) |t| {
-            t.*.deinit();
-            self.allocator.destroy(t.*);
+        var timer_iter = self.timers.iterator();
+        while (timer_iter.next()) |kv| {
+            const t = kv.value_ptr.*;
+            self.allocator.free(t.histogram.help);
+            t.deinit();
+            self.allocator.destroy(t);
+            self.allocator.free(kv.key_ptr.*); // owned name (== t.histogram.name)
         }
         self.timers.deinit();
     }
@@ -183,12 +200,18 @@ pub const Registry = struct {
 
         if (self.nameInUse(name)) return error.AlreadyRegistered;
 
+        // S-017: copy name/help into registry-owned memory so the hashmap
+        // key and the metric's strings cannot dangle if the caller frees
+        // its buffers. Freed in deinit().
+        const name_owned = self.allocator.dupe(u8, name) catch return error.OutOfMemory;
+        errdefer self.allocator.free(name_owned);
+        const help_owned = self.allocator.dupe(u8, help) catch return error.OutOfMemory;
+        errdefer self.allocator.free(help_owned);
+
         const c = self.allocator.create(Counter) catch return error.OutOfMemory;
-        c.* = Counter.init(name, help);
-        self.counters.put(name, c) catch {
-            self.allocator.destroy(c);
-            return error.OutOfMemory;
-        };
+        errdefer self.allocator.destroy(c);
+        c.* = Counter.init(name_owned, help_owned);
+        self.counters.put(name_owned, c) catch return error.OutOfMemory;
         return c;
     }
 
@@ -203,12 +226,18 @@ pub const Registry = struct {
 
         if (self.nameInUse(name)) return error.AlreadyRegistered;
 
+        // S-017: copy name/help into registry-owned memory so the hashmap
+        // key and the metric's strings cannot dangle if the caller frees
+        // its buffers. Freed in deinit().
+        const name_owned = self.allocator.dupe(u8, name) catch return error.OutOfMemory;
+        errdefer self.allocator.free(name_owned);
+        const help_owned = self.allocator.dupe(u8, help) catch return error.OutOfMemory;
+        errdefer self.allocator.free(help_owned);
+
         const g = self.allocator.create(Gauge) catch return error.OutOfMemory;
-        g.* = Gauge.init(name, help);
-        self.gauges.put(name, g) catch {
-            self.allocator.destroy(g);
-            return error.OutOfMemory;
-        };
+        errdefer self.allocator.destroy(g);
+        g.* = Gauge.init(name_owned, help_owned);
+        self.gauges.put(name_owned, g) catch return error.OutOfMemory;
         return g;
     }
 
@@ -227,9 +256,17 @@ pub const Registry = struct {
 
         if (self.nameInUse(name)) return error.AlreadyRegistered;
 
+        // S-017: copy name/help into registry-owned memory so the hashmap
+        // key and the metric's strings cannot dangle if the caller frees
+        // its buffers. Freed in deinit().
+        const name_owned = self.allocator.dupe(u8, name) catch return error.OutOfMemory;
+        errdefer self.allocator.free(name_owned);
+        const help_owned = self.allocator.dupe(u8, help) catch return error.OutOfMemory;
+        errdefer self.allocator.free(help_owned);
+
         const h = self.allocator.create(Histogram) catch return error.OutOfMemory;
-        h.* = Histogram.init(self.allocator, name, help, buckets) catch |err| {
-            self.allocator.destroy(h);
+        errdefer self.allocator.destroy(h);
+        h.* = Histogram.init(self.allocator, name_owned, help_owned, buckets) catch |err| {
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.EmptyBuckets => error.EmptyBuckets,
@@ -237,11 +274,8 @@ pub const Registry = struct {
                 error.NonFiniteBucket => error.NonFiniteBucket,
             };
         };
-        self.histograms.put(name, h) catch {
-            h.deinit();
-            self.allocator.destroy(h);
-            return error.OutOfMemory;
-        };
+        errdefer h.deinit();
+        self.histograms.put(name_owned, h) catch return error.OutOfMemory;
         return h;
     }
 
@@ -260,9 +294,17 @@ pub const Registry = struct {
 
         if (self.nameInUse(name)) return error.AlreadyRegistered;
 
+        // S-017: copy name/help into registry-owned memory so the hashmap
+        // key and the metric's strings cannot dangle if the caller frees
+        // its buffers. Freed in deinit().
+        const name_owned = self.allocator.dupe(u8, name) catch return error.OutOfMemory;
+        errdefer self.allocator.free(name_owned);
+        const help_owned = self.allocator.dupe(u8, help) catch return error.OutOfMemory;
+        errdefer self.allocator.free(help_owned);
+
         const t = self.allocator.create(Timer) catch return error.OutOfMemory;
-        t.* = Timer.init(self.allocator, name, help, buckets) catch |err| {
-            self.allocator.destroy(t);
+        errdefer self.allocator.destroy(t);
+        t.* = Timer.init(self.allocator, name_owned, help_owned, buckets) catch |err| {
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.EmptyBuckets => error.EmptyBuckets,
@@ -270,11 +312,8 @@ pub const Registry = struct {
                 error.NonFiniteBucket => error.NonFiniteBucket,
             };
         };
-        self.timers.put(name, t) catch {
-            t.deinit();
-            self.allocator.destroy(t);
-            return error.OutOfMemory;
-        };
+        errdefer t.deinit();
+        self.timers.put(name_owned, t) catch return error.OutOfMemory;
         return t;
     }
 
