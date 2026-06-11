@@ -122,16 +122,15 @@ make ci
 depending on `metrics` without any extra flags emits zero
 otel/observability symbols and never resolves the otel package.
 
-To compile in the seam:
+**The `-Dwith_otel` flag is currently compile-time disabled.** `build.zig`
+line 20 hardcodes `const with_otel = false;` as a workaround for a
+`build_options` deduplication issue in Zig 0.16 (see the comment in
+`build.zig`). The flag will be re-enabled once the upstream issue is
+resolved. Until then, the seam is always compiled in no-op mode regardless
+of any `-Dwith_otel` flag passed on the command line.
 
-```sh
-zig build test -Dwith_otel=true
-# or, when consuming metrics as a dependency:
-zig build -Dwith_otel=true
-```
-
-When the flag is on, the otel package is fetched lazily from the pinned
-SHA in `build.zig.zon` (`.otel`). When it is off, the verifier
+When the flag is re-enabled, the otel package will be fetched lazily from
+the pinned SHA in `build.zig.zon` (`.otel`). When it is off, the verifier
 `otel/scripts/verify-consumer-noop.sh` confirms no
 `otel`/`observability` symbols leak into the metrics build artifacts.
 

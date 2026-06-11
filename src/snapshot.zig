@@ -42,6 +42,10 @@ pub const MetricSnapshot = struct {
 };
 
 /// An immutable point-in-time collection of metric values.
+///
+/// The `name` and `help` slices inside each `MetricSnapshot` entry reference
+/// memory owned by the Registry that produced this snapshot. The Snapshot
+/// must not outlive the Registry it was captured from.
 pub const Snapshot = struct {
     entries: []MetricSnapshot,
     /// Owned storage for bucket count + boundary slices.

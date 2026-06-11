@@ -9,6 +9,8 @@ A Zig library for metrics
 - [Requirements](REQUIREMENTS.md)
 - [Gap Analysis](GAP_ANALYSIS.md)
 - [Resolved Gaps](GAP_ANALYSIS_RESOLVED.md)
+- [Registry Lifecycle and Ownership](registry.md)
+- [Prometheus Export](prometheus.md)
 
 ## Quick Links
 
