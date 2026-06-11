@@ -106,9 +106,12 @@ an unbuffered sink (raw socket, `std.fs.File` without buffering), wrap it
 in a buffered writer to avoid a syscall per print:
 
 ```zig
-// Example: write to an unbuffered file with buffering
-var bw = std.io.bufferedWriter(file.writer());
-// (std.io buffered writer — adapt to your actual writer type)
+// A file/stdout writer in Zig 0.16 takes its buffer at construction:
+const io_inst = std.Io.Threaded.global_single_threaded.io();
+var out_buf: [8192]u8 = undefined;
+var fw = std.Io.File.stdout().writer(io_inst, &out_buf);
+try metrics.writePrometheus(&reg, &fw.interface);
+try fw.interface.flush();
 ```
 
 `std.Io.Writer.fixed` (used in tests) is already fully buffered in memory
@@ -149,7 +152,9 @@ requests_total 3
 
 ## HTTP Transport
 
-`writePrometheus` accepts any `*std.Io.Writer`, so the library is
+`writePrometheus` accepts any writer — its second parameter is `anytype`, so
+anything with a `print` method works (a `*std.Io.Writer`, a buffered file
+writer, your framework's response writer) — the library is
 transport-agnostic. A typical `/metrics` HTTP handler:
 
 ```zig
