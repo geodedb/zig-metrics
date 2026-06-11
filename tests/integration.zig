@@ -121,8 +121,10 @@ test "no globals: two registries are fully independent" {
 // Version
 // ============================================================================
 
-test "version is defined" {
-    try std.testing.expectEqualStrings("0.1.0", metrics.version);
+test "version matches build manifest" {
+    try std.testing.expectEqualStrings(@import("build_options").version, metrics.version);
+    // Sanity: semver-ish shape (at least "x.y.z").
+    try std.testing.expect(std.mem.count(u8, metrics.version, ".") == 2);
 }
 
 // ============================================================================

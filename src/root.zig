@@ -32,8 +32,8 @@
 
 const std = @import("std");
 
-/// Library version.
-pub const version = "0.1.0";
+/// Library version, injected from build.zig.zon via build_options (Q-020).
+pub const version: []const u8 = @import("build_options").version;
 
 // ============================================================================
 // Public API - Re-exported modules

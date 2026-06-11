@@ -27,6 +27,22 @@ pub fn build(b: *std.Build) void {
     // test, the check step) reuses this single instance.
     const build_options = b.addOptions();
     build_options.addOption(bool, "with_otel", with_otel);
+
+    // Q-020: single-source the library version from build.zig.zon so
+    // code and manifest cannot drift. ZON imports are typed; declare
+    // only the fields we read.
+    const manifest: struct {
+        name: enum { metrics },
+        version: []const u8,
+        fingerprint: u64,
+        minimum_zig_version: []const u8,
+        dependencies: struct {
+            thread_pool: struct { url: []const u8, hash: []const u8 },
+        },
+        paths: []const []const u8,
+    } = @import("build.zig.zon");
+    build_options.addOption([]const u8, "version", manifest.version);
+
     const build_options_module = build_options.createModule();
 
     // Thread pool dependency (structured concurrency)
@@ -145,6 +161,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "metrics", .module = module },
                 .{ .name = "thread_pool", .module = tp_module },
+                .{ .name = "build_options", .module = build_options_module },
             },
         }),
     });
