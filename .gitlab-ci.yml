@@ -91,6 +91,16 @@ build:
   script:
     - zig build check
 
+# Compile-only benchmark gate (GAP-005): catches stdlib API drift in
+# benchmark sources without running them.
+bench-check:
+  stage: build
+  image: debian:bookworm-slim
+  before_script:
+    - *install-zig
+  script:
+    - zig build bench-check
+
 # Unit tests
 test:
   stage: test

@@ -101,7 +101,7 @@ const MixedWorkCtx = struct {
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -114,18 +114,11 @@ pub fn main() !void {
     var stdout_fw = std.Io.File.stdout().writer(io_inst, &stdout_buf);
     const stdout = &stdout_fw.interface;
 
-    // Parse optional tier filter from CLI args
-    var filter_buf: [16][]const u8 = undefined;
-    var filter_count: usize = 0;
-    var args = std.process.args();
-    _ = args.next(); // skip program name
-    while (args.next()) |arg| {
-        if (filter_count < filter_buf.len) {
-            filter_buf[filter_count] = arg;
-            filter_count += 1;
-        }
-    }
-    const filters = filter_buf[0..filter_count];
+    // Parse optional tier filter from CLI args (Zig 0.16: args come from
+    // std.process.Init instead of the removed std.process.args()).
+    const argv = try init.minimal.args.toSlice(allocator);
+    defer allocator.free(argv);
+    const filters = if (argv.len > 1) argv[1..] else argv[0..0];
 
     try stderr.print(
         \\================================================================================

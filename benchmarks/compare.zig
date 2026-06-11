@@ -81,7 +81,7 @@ const BenchmarkFile = struct {
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -91,22 +91,20 @@ pub fn main() !void {
     var stdout_fw = std.Io.File.stdout().writer(io_inst, &stdout_buf);
     const stdout = &stdout_fw.interface;
 
-    // Parse CLI args
-    var args = std.process.args();
-    _ = args.next(); // skip program name
+    // Parse CLI args (Zig 0.16: args come from std.process.Init instead of
+    // the removed std.process.args()).
+    const argv = try init.minimal.args.toSlice(allocator);
+    defer allocator.free(argv);
 
-    const baseline_path = args.next() orelse {
+    if (argv.len < 3) {
         try stdout.print("Usage: compare <baseline.json> <current.json> [threshold%]\n", .{});
         try stdout.flush();
         std.process.exit(2);
-    };
-    const current_path = args.next() orelse {
-        try stdout.print("Usage: compare <baseline.json> <current.json> [threshold%]\n", .{});
-        try stdout.flush();
-        std.process.exit(2);
-    };
-    const threshold: f64 = if (args.next()) |t|
-        std.fmt.parseFloat(f64, t) catch DEFAULT_THRESHOLD
+    }
+    const baseline_path = argv[1];
+    const current_path = argv[2];
+    const threshold: f64 = if (argv.len > 3)
+        std.fmt.parseFloat(f64, argv[3]) catch DEFAULT_THRESHOLD
     else
         DEFAULT_THRESHOLD;
 

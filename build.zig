@@ -200,6 +200,14 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_compare_bench.addArgs(args);
     compare_bench_step.dependOn(&run_compare_bench.step);
 
+    // Compile-only gate for all benchmark executables. CI runs this so
+    // benchmark bit-rot (e.g. stdlib API removals) is caught at merge
+    // time without paying the cost of running the benchmarks (GAP-005).
+    const bench_check_step = b.step("bench-check", "Compile all benchmarks without running");
+    bench_check_step.dependOn(&bench_exe.step);
+    bench_check_step.dependOn(&scale_bench_exe.step);
+    bench_check_step.dependOn(&compare_bench_exe.step);
+
     // Check step for IDE integration (fast syntax validation)
     const check_step = b.step("check", "Check for compilation errors");
     const check = b.addTest(.{
