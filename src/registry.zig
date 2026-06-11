@@ -15,12 +15,13 @@
 const std = @import("std");
 const tp = @import("thread_pool");
 
-/// 0.16.0 shim: std.Thread.RwLock was moved to std.Io.RwLock and requires
-/// an Io instance for all lock/unlock calls. Wrap std.Io.Mutex instead to
-/// keep the Registry API Io-free. Read-vs-write distinction is sacrificed
-/// (all ops take exclusive lock) but correctness is preserved.
+/// Zig 0.16 lock wrapper. std.Thread.RwLock moved to std.Io.RwLock and
+/// every lock/unlock call needs an Io instance; this wrapper supplies
+/// the global single-threaded Io so the Registry API stays Io-parameter
+/// free. Real reader-writer semantics: concurrent getX/snapshot calls
+/// take a shared lock and no longer serialize against each other (P-014).
 const RwLockShim = struct {
-    inner: std.Io.Mutex = std.Io.Mutex.init,
+    inner: std.Io.RwLock = .init,
 
     fn getIo() std.Io {
         return std.Io.Threaded.global_single_threaded.io();
@@ -33,10 +34,10 @@ const RwLockShim = struct {
         self.inner.unlock(getIo());
     }
     pub fn lockShared(self: *RwLockShim) void {
-        self.inner.lockUncancelable(getIo());
+        self.inner.lockSharedUncancelable(getIo());
     }
     pub fn unlockShared(self: *RwLockShim) void {
-        self.inner.unlock(getIo());
+        self.inner.unlockShared(getIo());
     }
 };
 const compat = @import("compat.zig");
