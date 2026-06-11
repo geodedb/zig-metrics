@@ -43,7 +43,7 @@ Keep in Geode or make optional later:
 |---|---|---|---|
 | Three overlapping metrics surfaces exist today | **Closed** | `src/monitoring/metrics.zig:5`, `src/monitoring/prometheus.zig:233`, `src/monitoring/registry.zig:49` | Consolidated into one coherent model: `src/counter.zig`, `src/gauge.zig`, `src/histogram.zig`, `src/timer.zig`, `src/snapshot.zig`, `src/registry.zig`, `src/prometheus.zig` with a single public API in `src/root.zig`. |
 | Global singleton state exists | **Closed** | `src/monitoring/registry.zig:85`, `src/monitoring/metrics_server.zig:139` | `Registry` is fully instance-based. No module-level mutable state. Verified by integration test `no globals: two registries are fully independent`. |
-| Standalone review found Zig drift in `metrics.zig` | **Closed** | standalone compile failed during review | All code compiles and passes tests on Zig 0.15.2 (Debug, ReleaseSafe, ReleaseFast). |
+| Standalone review found Zig drift in `metrics.zig` | **Closed** | standalone compile failed during review | At extraction time all code compiled and passed tests on Zig 0.15.2 (Debug, ReleaseSafe, ReleaseFast); since superseded by the Zig 0.16.0 migration -- current toolchain is Zig 0.16.0 and the registry uses `std.Io.RwLock` (P-014). |
 | `metrics_server.zig` mixes transport concerns with metrics | **Closed** | `src/monitoring/metrics_server.zig:10`, `:50`, `:125` | HTTP server transport is not included in this library. Core exposes `writePrometheus(registry, writer)` which accepts any `writer` -- transport adapters remain in Geode. |
 
 ## Tests And Benchmarks Carried Over

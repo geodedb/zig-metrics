@@ -20,8 +20,8 @@ Items moved from `GAP_ANALYSIS.md` after verification.
 
 - **Status:** Closed
 - **Closed:** 2026-03-23
-- **Resolution:** Implementation written for Zig 0.15.x from scratch. Uses current `std.atomic.Value`, `std.Thread.Mutex`, and `std.fs.File.deprecatedWriter` APIs.
-- **Evidence:** All tests pass in Debug, ReleaseSafe, and ReleaseFast modes on Zig 0.15.2.
+- **Resolution:** Implementation written for Zig 0.15.x from scratch (historical, as of extraction). At the time it used `std.atomic.Value`, `std.Thread.Mutex`, and `std.fs.File.deprecatedWriter`. Superseded by the Zig 0.16.0 migration: the current toolchain is Zig 0.16.0 and the registry lock is `std.Io.RwLock` (P-014).
+- **Evidence:** At closure (2026-03-23), all tests passed in Debug, ReleaseSafe, and ReleaseFast modes on Zig 0.15.2; the suite now passes on Zig 0.16.0.
 
 ## GAP-004: metrics_server.zig mixes transport concerns
 
@@ -97,3 +97,33 @@ Items moved from `GAP_ANALYSIS.md` after verification.
 - **Closed:** 2026-06-11
 - **Resolution:** Updated README.md badge to `Zig-0.16.0+`, install URL from v0.1.0 to v0.1.3, and Requirements from `Zig 0.15.1 or later` to `Zig 0.16.0 or later`. All README version claims now consistent with `build.zig.zon`.
 - **Evidence:** commit b6c56a6 (`docs: close GAP-008/GAP-009/Q-018/Q-019 - README accuracy batch`). Cross-ref: in-source version-constant drift (Q-020) closed separately by commit 3106587.
+
+## GAP-010: build.zig.zon version stale at 0.1.3 while v0.1.4 is tagged
+
+- **Issue:** [#38](https://gitlab.com/devnw/zig/metrics/-/issues/38) (closed)
+- **Category:** Bug
+- **Severity:** Low
+- **Status:** Closed
+- **Closed:** 2026-06-11
+- **Resolution:** Bumped `build.zig.zon` `.version` from `"0.1.3"` to `"0.1.4"`, matching the existing `v0.1.4` git tag and the `[0.1.4]` CHANGELOG section per repo release convention. No other edits needed: `src/root.zig` derives `metrics.version` from the manifest via build_options (Q-020).
+- **Evidence:** this commit. `zig build test-integration --summary all` passes (11/11) including `version matches build manifest`, with the generated build options carrying `.version = "0.1.4"`.
+
+## GAP-011: README install URL pins v0.1.3 instead of v0.1.4
+
+- **Issue:** [#39](https://gitlab.com/devnw/zig/metrics/-/issues/39) (closed)
+- **Category:** Bug
+- **Severity:** Low
+- **Status:** Closed
+- **Closed:** 2026-06-11
+- **Resolution:** Updated the README.md install snippet archive URL from `v0.1.3/metrics-v0.1.3.tar.gz` to `v0.1.4/metrics-v0.1.4.tar.gz`.
+- **Evidence:** this commit. README.md:29; `grep -n "0\.1\.3" README.md` returns no matches.
+
+## GAP-012: Stale Zig 0.15.2 / std.Thread.Mutex claims in gap-analysis docs
+
+- **Issue:** [#40](https://gitlab.com/devnw/zig/metrics/-/issues/40) (closed)
+- **Category:** Docs
+- **Severity:** Low
+- **Status:** Closed
+- **Closed:** 2026-06-11
+- **Resolution:** Annotated the historical extraction-era claims as superseded: `docs/GAP_ANALYSIS.md` Concrete Gaps row now states the Zig 0.15.2 result was at extraction time and the current toolchain is Zig 0.16.0 with `std.Io.RwLock` (P-014); the GAP-003 entry above was likewise reworded to mark `std.Thread.Mutex` / Zig 0.15.x as historical-as-of-extraction, superseded by the 0.16 migration and P-014.
+- **Evidence:** this commit. docs/GAP_ANALYSIS.md:46; docs/GAP_ANALYSIS_RESOLVED.md GAP-003 Resolution/Evidence lines.

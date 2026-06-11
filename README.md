@@ -26,7 +26,7 @@ Add to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .metrics = .{
-        .url = "https://gitlab.com/devnw/zig/metrics/-/archive/v0.1.3/metrics-v0.1.3.tar.gz",
+        .url = "https://gitlab.com/devnw/zig/metrics/-/archive/v0.1.4/metrics-v0.1.4.tar.gz",
         .hash = "...",
     },
 },

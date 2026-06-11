@@ -36,6 +36,9 @@ pub fn build(b: *std.Build) void {
         version: []const u8,
         fingerprint: u64,
         minimum_zig_version: []const u8,
+        // MUST list every dependency in build.zig.zon: typed ZON imports
+        // error on undeclared fields. Re-adding .otel (or any new dep) to
+        // the manifest requires adding it here too (Q-030).
         dependencies: struct {
             thread_pool: struct { url: []const u8, hash: []const u8 },
         },

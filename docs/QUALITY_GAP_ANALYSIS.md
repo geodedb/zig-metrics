@@ -67,6 +67,16 @@ All open quality findings Q-018..Q-029 were closed in the 2026-06-11 gap-closure
 - **Q-029** (1066c72): `Timer.getBucketCount`/`name` accessors added; no-deinit notes and `nameInUse` lock-dependency comment added.
 - **Q-011** (GAP-005 + Q-022): both blockers resolved; CI now compiles examples (`bench-check` job) and the example step.
 
+## Closed Findings (Round-2 audit — Q-030, closed 2026-06-11)
+
+| Rank | Severity | PriorityScore | Category | Finding | Component | Commit | Issue | Status |
+|---|---|---|---|---|---|---|---|---|
+| 1 | Low | 24 | maintainability | Typed ZON manifest import in `build.zig` hard-errors on undeclared dependency fields; otel re-enable path would hit a confusing compile error pointing at the .zon file | build.zig | this commit | [#41](https://gitlab.com/devnw/zig/metrics/-/issues/41) | **Closed** |
+
+### Resolution notes (round 2)
+
+- **Q-030** (this commit, 2026-06-11): warning comment added directly above the `dependencies: struct {` sub-struct in `build.zig` stating every dependency in `build.zig.zon` MUST be declared there, and that re-adding `.otel` (or any new dep) to the manifest requires updating the struct. No behavior change; `zig build check` / full test suite green.
+
 ## Roadmap
 
 No open roadmap items. All Q-018..Q-029 sprint items closed.
