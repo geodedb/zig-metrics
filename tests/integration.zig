@@ -253,3 +253,87 @@ test "thread_pool: parallelSnapshot shards histograms when count > chunk_size" {
         try std.testing.expectApproxEqAbs(@as(f64, @floatFromInt(i + 1)), hs.hist_sum, 1e-10);
     }
 }
+
+test "thread_pool: parallelSnapshot never returns garbage entries under pool saturation (S-018)" {
+    // Tiny descriptor pool + many single-metric shards forces partial
+    // batch submission. With the fix, every iteration either succeeds
+    // with fully-initialized entries or fails cleanly with
+    // error.SnapshotIncomplete / a pool error -- never garbage.
+    var reg = metrics.Registry.initWithOptions(std.testing.allocator, .{
+        .snapshot_chunk_size = 1,
+    });
+    defer reg.deinit();
+
+    const buckets = [_]f64{ 0.5, 1.0 };
+    inline for (0..32) |i| {
+        const name = std.fmt.comptimePrint("sat_h_{d}", .{i});
+        const h = try reg.histogram(name, "help", &buckets);
+        h.observe(0.25);
+    }
+
+    // Phase 1: saturated pool. queue_capacity doubles as the descriptor
+    // cap (queued + running), so 4 slots can never hold the 34-task
+    // batch (1 gauge + 32 hist shards + 1 timer): under .return_error
+    // backpressure submitBatch accepts a prefix and reports a short
+    // `submitted` count without an error. Pre-fix, parallelSnapshot
+    // returned "success" here with uninitialized entries (wild
+    // name/help pointers); post-fix every iteration must be rejected
+    // cleanly and never hand back a partially-written snapshot.
+    {
+        var pool = try tp.ThreadPool.init(std.testing.allocator, .{
+            .max_threads = 1,
+            .queue_capacity = 4,
+        });
+        defer pool.deinit();
+
+        var clean_rejections: usize = 0;
+        for (0..50) |_| {
+            var snap = reg.parallelSnapshot(&pool) catch |err| switch (err) {
+                error.SnapshotIncomplete => {
+                    clean_rejections += 1; // clean partial-submit rejection
+                    continue;
+                },
+                else => continue, // pool backpressure errors are acceptable
+            };
+            defer snap.deinit();
+            // A surprise success is fine only if fully initialized.
+            try std.testing.expectEqual(@as(usize, 32), snap.len());
+            for (snap.entries) |*entry| {
+                try std.testing.expect(entry.name.len >= 7); // "sat_h_N"
+                try std.testing.expect(std.mem.startsWith(u8, entry.name, "sat_h_"));
+                try std.testing.expectEqual(@as(u64, 1), entry.hist_count);
+            }
+        }
+        // 34 tasks can never fit 4 descriptor slots: the guard must fire.
+        try std.testing.expect(clean_rejections > 0);
+    }
+
+    // Phase 2: ample pool. The same registry must snapshot successfully
+    // with every entry fully initialized and readable.
+    {
+        var pool = try tp.ThreadPool.init(std.testing.allocator, .{
+            .max_threads = 2,
+            .queue_capacity = 64,
+        });
+        defer pool.deinit();
+
+        var successes: usize = 0;
+        for (0..50) |_| {
+            var snap = reg.parallelSnapshot(&pool) catch |err| switch (err) {
+                error.SnapshotIncomplete => continue,
+                else => continue,
+            };
+            defer snap.deinit();
+            successes += 1;
+            try std.testing.expectEqual(@as(usize, 32), snap.len());
+            for (snap.entries) |*entry| {
+                try std.testing.expect(entry.name.len >= 7); // "sat_h_N"
+                try std.testing.expect(std.mem.startsWith(u8, entry.name, "sat_h_"));
+                try std.testing.expectEqual(@as(u64, 1), entry.hist_count);
+            }
+        }
+        // With 64 descriptor slots for 34 tasks the pool drains fast, so
+        // most iterations should succeed.
+        try std.testing.expect(successes > 0);
+    }
+}

@@ -328,14 +328,17 @@ pub const Registry = struct {
     ///
     /// Requires an initialised thread-pool.
     ///
-    /// Errors: `OutOfMemory` from the pre-allocation phase, or any error
+    /// Errors: `OutOfMemory` from the pre-allocation phase, any error
     /// that `tp.ThreadPool.submitBatch` can return (e.g.
     /// `error.ShutdownInProgress`, `error.QueueFull`, `error.Timeout`,
-    /// `error.TaskPoolExhausted`, `error.BuildOptionMismatch`). The error
-    /// set is inferred from the implementation so callers see the actual
-    /// failure rather than a coerced `OutOfMemory` — a shutting-down
-    /// pool looks nothing like an allocator failure and should not be
-    /// triaged as one.
+    /// `error.TaskPoolExhausted`, `error.BuildOptionMismatch`), or
+    /// `error.SnapshotIncomplete` when the pool accepted only part of
+    /// the capture batch under `.return_error` backpressure (S-018) --
+    /// the unsubmitted shards never ran, so the snapshot would contain
+    /// uninitialized entries. The error set is inferred from the
+    /// implementation so callers see the actual failure rather than a
+    /// coerced `OutOfMemory` — a shutting-down pool looks nothing like
+    /// an allocator failure and should not be triaged as one.
     pub fn parallelSnapshot(self: *Registry, pool: *tp.ThreadPool) !Snapshot {
         self.rwlock.lockShared();
         defer self.rwlock.unlockShared();
@@ -559,7 +562,14 @@ pub const Registry = struct {
         // Propagate the real thread-pool error (ShutdownInProgress,
         // QueueFull, etc.) instead of masking it as OutOfMemory. See the
         // parallelSnapshot doc comment for the full inferred error set.
-        _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
+        //
+        // S-018: if submitBatch fails partway, tasks submitted before the
+        // failure are already running and writing into our buffers -- we
+        // must drain them before errdefer frees that memory.
+        const submit_result = pool.submitBatch(tasks, .{ .wait_group = &wg }) catch |err| {
+            wg.wait();
+            return err;
+        };
 
         // Capture counters on the calling thread while workers run.
         {
@@ -578,6 +588,12 @@ pub const Registry = struct {
         }
 
         wg.wait();
+
+        // S-018: under .return_error backpressure submitBatch can accept
+        // only part of the batch without raising an error. Unsubmitted
+        // shards never ran, so their output slots are uninitialized --
+        // returning them would hand the caller wild name/help pointers.
+        if (submit_result.submitted != total_tasks) return error.SnapshotIncomplete;
 
         return .{
             .entries = entries,
