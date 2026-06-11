@@ -1,16 +1,21 @@
 # metrics
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Zig](https://img.shields.io/badge/Zig-0.15.1+-orange.svg)](https://ziglang.org/)
+[![Zig](https://img.shields.io/badge/Zig-0.16.0+-orange.svg)](https://ziglang.org/)
 
 A Zig library for metrics
 
 ## Features
 
-- **Zero Dependencies**: Pure Zig standard library only
+- **Minimal Dependencies**: Zig standard library plus one dependency ([thread-pool](https://gitlab.com/devnw/zig/thread-pool), used by `parallelSnapshot`)
 - **Memory Safe**: Proper allocation patterns with no leaks
 - **Cross-Platform**: Linux, macOS support (Windows cross-compiles but is not CI-validated)
 - **Well Tested**: Comprehensive unit and integration tests
+
+> **Note on metric names:** keep names low-cardinality and
+> developer-controlled — never derive them from untrusted input
+> (user IDs, request paths). Each unique name allocates permanently
+> until `deinit`. Use `RegistryOptions.max_metrics` to enforce a cap.
 
 ## Installation
 
@@ -21,7 +26,7 @@ Add to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .metrics = .{
-        .url = "https://gitlab.com/devnw/zig/metrics/-/archive/v0.1.0/metrics-v0.1.0.tar.gz",
+        .url = "https://gitlab.com/devnw/zig/metrics/-/archive/v0.1.3/metrics-v0.1.3.tar.gz",
         .hash = "...",
     },
 },
@@ -44,7 +49,7 @@ const std = @import("std");
 const metrics = @import("metrics");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -65,14 +70,33 @@ pub fn main() !void {
 
     // Export to Prometheus text format
     var buf: [8192]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try metrics.writePrometheus(&reg, fbs.writer());
+    var writer: std.Io.Writer = .fixed(&buf);
+    try metrics.writePrometheus(&reg, &writer);
+    std.debug.print("{s}", .{writer.buffered()});
 }
 ```
 
+## Exporting over HTTP (bring your own transport)
+
+`metrics` deliberately ships **no HTTP server**. `writePrometheus`
+accepts any `*std.Io.Writer`, so the library stays transport-agnostic:
+wire it to a fixed buffer, a socket, a file, or your framework's
+response writer. A typical `/metrics` endpoint handler:
+
+```zig
+fn handleMetrics(reg: *metrics.Registry, response_writer: *std.Io.Writer) !void {
+    // Snapshot is captured under the registry lock; writing happens
+    // outside it, so a slow client never blocks metric producers.
+    try metrics.writePrometheus(reg, response_writer);
+}
+```
+
+HTTP server wiring (routes, content-type `text/plain; version=0.0.4`,
+auth) belongs to the embedding application — see MET-REQ-005.
+
 ## Requirements
 
-- Zig 0.15.1 or later
+- Zig 0.16.0 or later
 
 ## Building
 
