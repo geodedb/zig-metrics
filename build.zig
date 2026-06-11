@@ -243,6 +243,22 @@ pub fn build(b: *std.Build) void {
     bench_check_step.dependOn(&scale_bench_exe.step);
     bench_check_step.dependOn(&compare_bench_exe.step);
 
+    // Runnable example (Q-022). Compiled in CI so it cannot rot.
+    const example_step = b.step("example", "Build and run the basic example");
+    const example_exe = b.addExecutable(.{
+        .name = "example-basic",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/basic.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "metrics", .module = module },
+            },
+        }),
+    });
+    const run_example = b.addRunArtifact(example_exe);
+    example_step.dependOn(&run_example.step);
+
     // Check step for IDE integration (fast syntax validation)
     const check_step = b.step("check", "Check for compilation errors");
     const check = b.addTest(.{

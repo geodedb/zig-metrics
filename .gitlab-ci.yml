@@ -90,6 +90,7 @@ build:
     - *install-zig
   script:
     - zig build check
+    - zig build example
 
 # Compile-only benchmark gate (GAP-005): catches stdlib API drift in
 # benchmark sources without running them.
