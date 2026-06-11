@@ -8,23 +8,31 @@ default:
 
 include:
   # Security scanning
-  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.7.1
-  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.7.1
-  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.7.1
-  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.7.1
+  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.25.2
+  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.25.2
+  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.25.2
+  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.25.2
 
   # Code quality
-  - component: gitlab.com/devnw/ci-catalog/zig-format@v1.2.1
+  - component: gitlab.com/devnw/ci-catalog/zig-format@v1.25.2
+    inputs:
+      # Must match ZIG_VERSION below: the component sets a job-level
+      # ZIG_VERSION from this input, which shadows the global variable.
+      zig_version: "0.16.0"
 
   # SBOM
-  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.7.1
-  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.7.1
+  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.25.2
+  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.25.2
 
   # Release
-  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.7.1
+  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.25.2
 
 variables:
+  # S-022(c): security-relevant pin — SHA-verified by .install-zig against the
+  # ziglang.org download index; do not override via pipeline variables.
   ZIG_VERSION: "0.16.0"
+  # S-022(a): digest-pinned base image (debian:bookworm-slim as of 2026-06-11).
+  CI_BASE_IMAGE: "debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf87857c4b8188404716"
 
 stages:
   - lint
@@ -38,6 +46,18 @@ stages:
 # Zig installation template (SEC-R6-02: SHA-256 verified via ziglang.org index)
 .install-zig: &install-zig
   - apt-get update && apt-get install -y curl xz-utils python3
+  # S-022(d): re-verify cached Zig binary on every run. A cache that fails
+  # verification aborts the job; a cache missing its verification marker is
+  # purged so the download step below re-fetches and re-verifies it.
+  - |
+    if [ -f "zig-${ZIG_VERSION}/zig" ]; then
+      if [ -f "zig-${ZIG_VERSION}/.zig-binary.sha256" ]; then
+        sha256sum --check --strict "zig-${ZIG_VERSION}/.zig-binary.sha256" || { echo "Cached Zig binary failed verification (S-022d)"; exit 1; }
+      else
+        echo "Cached Zig binary missing verification marker; purging cache for re-download (S-022d)"
+        rm -rf "zig-${ZIG_VERSION}"
+      fi
+    fi
   - |
     if [ ! -f "zig-${ZIG_VERSION}/zig" ]; then
       ARCH=$(uname -m)
@@ -72,12 +92,16 @@ stages:
       tar -xJf "${TARBALL}"
       mv "${ARCHIVE_NAME}" "zig-${ZIG_VERSION}"
       rm -f "${TARBALL}"
+      # S-022(d): record binary checksum so cached copies are re-verified above.
+      sha256sum "zig-${ZIG_VERSION}/zig" > "zig-${ZIG_VERSION}/.zig-binary.sha256"
     fi
   - export PATH="$PWD/zig-${ZIG_VERSION}:$PATH"
   - zig version
 
-# Override zig-format component to use the project's ZIG_VERSION.
-# The v1.2.1 component defaults to 0.14.0 and does not accept a version input.
+# Override zig-format component's before_script with the project's hardened
+# install (SHA-verified + S-022d cache re-verification). The component's
+# zig_version input is pinned at the include above so the job-level
+# ZIG_VERSION matches the project pin.
 zig-format:
   before_script:
     - *install-zig
@@ -85,7 +109,7 @@ zig-format:
 # Build job
 build:
   stage: build
-  image: debian:bookworm-slim
+  image: $CI_BASE_IMAGE
   before_script:
     - *install-zig
   script:
@@ -96,7 +120,7 @@ build:
 # benchmark sources without running them.
 bench-check:
   stage: build
-  image: debian:bookworm-slim
+  image: $CI_BASE_IMAGE
   before_script:
     - *install-zig
   script:
@@ -105,7 +129,7 @@ bench-check:
 # Unit tests
 test:
   stage: test
-  image: debian:bookworm-slim
+  image: $CI_BASE_IMAGE
   before_script:
     - *install-zig
   script:
@@ -116,7 +140,7 @@ test:
 # Integration tests
 test-integration:
   stage: test
-  image: debian:bookworm-slim
+  image: $CI_BASE_IMAGE
   before_script:
     - *install-zig
   script:
@@ -127,7 +151,7 @@ test-integration:
 # Release optimization tests
 test-release-safe:
   stage: test
-  image: debian:bookworm-slim
+  image: $CI_BASE_IMAGE
   before_script:
     - *install-zig
   script:
@@ -138,7 +162,7 @@ test-release-safe:
 # ReleaseFast tests
 test-release-fast:
   stage: test
-  image: debian:bookworm-slim
+  image: $CI_BASE_IMAGE
   before_script:
     - *install-zig
   script:
@@ -148,7 +172,7 @@ test-release-fast:
 
 test-integration-release-safe:
   stage: test
-  image: debian:bookworm-slim
+  image: $CI_BASE_IMAGE
   before_script:
     - *install-zig
   script:
@@ -158,7 +182,7 @@ test-integration-release-safe:
 
 test-integration-release-fast:
   stage: test
-  image: debian:bookworm-slim
+  image: $CI_BASE_IMAGE
   before_script:
     - *install-zig
   script:
@@ -169,7 +193,7 @@ test-integration-release-fast:
 # ReleaseSmall tests
 test-release-small:
   stage: test
-  image: debian:bookworm-slim
+  image: $CI_BASE_IMAGE
   before_script:
     - *install-zig
   script:
@@ -186,7 +210,7 @@ test-release-small:
 #   other : fuzzer found a crash - fail the job
 fuzz:
   stage: fuzz
-  image: debian:bookworm-slim
+  image: $CI_BASE_IMAGE
   before_script:
     - *install-zig
   script:
@@ -209,7 +233,7 @@ fuzz:
 # Results are stored as artifacts for trend analysis.
 bench-regression:
   stage: fuzz
-  image: debian:bookworm-slim
+  image: $CI_BASE_IMAGE
   before_script:
     - *install-zig
   script:
