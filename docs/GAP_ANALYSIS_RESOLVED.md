@@ -29,3 +29,21 @@ Items moved from `GAP_ANALYSIS.md` after verification.
 - **Closed:** 2026-03-23
 - **Resolution:** HTTP server transport is not included. `writePrometheus(registry, writer)` accepts any writer type, allowing Geode (or any consumer) to wire their own transport.
 - **Evidence:** No HTTP/server/socket imports exist in the library source.
+
+## README Quick Start used non-existent metrics.init() API [RESOLVED]
+
+- **Issue:** [#14](https://gitlab.com/devnw/zig/metrics/-/issues/14) (closed)
+- **Category:** Bug
+- **Status:** Closed
+- **Closed:** 2026-06-11
+- **Resolution:** The README Quick Start example was rewritten to use the real instance-based API. It now constructs a GeneralPurposeAllocator, creates an instance-based `Registry`, registers a counter/gauge/histogram, and exports via `metrics.writePrometheus(&reg, fbs.writer())`. No `metrics.init(.{...})` call remains.
+- **Evidence:** README.md:52 -- `var reg = metrics.Registry.init(allocator);` (full block README.md:42-70); matches src/root.zig public API and integration tests.
+
+## README claimed Windows support but CI does not test Windows targets [RESOLVED]
+
+- **Issue:** [#15](https://gitlab.com/devnw/zig/metrics/-/issues/15) (closed)
+- **Category:** Bug
+- **Status:** Closed
+- **Closed:** 2026-06-11
+- **Resolution:** The Cross-Platform feature line was rescoped to state Windows is cross-compile-only and not CI-validated, removing the overstated platform-coverage claim. Now consistent with the `.gitlab-ci.yml` `test-cross-build` job (linux + macos only).
+- **Evidence:** README.md:12 -- `- **Cross-Platform**: Linux, macOS support (Windows cross-compiles but is not CI-validated)`.
