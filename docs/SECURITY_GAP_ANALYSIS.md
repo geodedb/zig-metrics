@@ -15,45 +15,29 @@ Last updated: 2026-06-11
 | Severity | Open | Closed | Won't Do |
 |---|---|---|---|
 | Critical | 0 | 0 | 0 |
-| High | 1 | 2 | 0 |
-| Medium | 3 | 6 | 2 |
-| Low | 2 | 6 | 4 |
-| Info | 1 | 0 | 1 |
-| **Total** | **7** | **14** | **7** |
+| High | 0 | 3 | 0 |
+| Medium | 0 | 9 | 2 |
+| Low | 0 | 9 | 4 |
+| Info | 0 | 1 | 1 |
+| **Total** | **0** | **22** | **7** |
 
-### Top 5 open risks (by Risk Score)
+All S-017..S-023 findings closed in the 2026-06-11 gap-closure sprint. S-022(b) (index.json TOFU) retains a Won't Do note — see resolution below.
 
-1. **S-018 (64, High)** — `parallelSnapshot` discards partial-submit result → uninitialized snapshot entries → OOB read / info-disclosure / crash. CWE-908/125. *Reachable in normal operation; confidential.*
-2. **S-017 (36, Medium)** — borrowed name/help slices stored by reference + used as map key (no dupe) → dangling-pointer dereference. CWE-416/825.
-3. **S-019 (36, Medium)** — unbounded metric cardinality → OOM DoS when names derive from untrusted input. CWE-770/400.
-4. **S-021 (24, Medium)** — CI catalog security components stale (v1.7.1 vs org-standard v1.25.1, 18-version drift). Supply chain.
-5. **S-022 (12, Low)** — CI/CD hardening bundle (image digests, index TOFU, ZIG_VERSION override, cache re-verify, gitleaks pre-commit hook).
+## Open Findings
 
-## Open Findings (stack-ranked by Risk Score)
-
-| Rank | Severity | Risk | Finding | Component | CWE/OWASP | Evidence (file:line) | Issue | Fix | Owner | Due | Status |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | High | 64 | `parallelSnapshot` discards `SubmitBatchResult.submitted`; partial submit under `.return_error` leaves uninitialized `entries` (alloc'd 363), `wg.wait` returns, `Snapshot.get` reads wild slice ptr | registry.zig, snapshot.zig | CWE-908/125, A04:2021 | registry.zig:363,562,580; snapshot.zig:67 | [#21](https://gitlab.com/devnw/zig/metrics/-/work_items/21) (confidential) | Check `res.submitted != total_tasks` → `error.SnapshotIncomplete`; pre-zero entries | <benji@vester.by> | 2026-07-11 | Open |
-| 2 | Medium | 36 | Borrowed name/help stored by reference + used as hashmap key without dupe; contradicts "owns lifecycle" doc + README "Memory Safe" | registry.zig, counter.zig | CWE-416/825, A04:2021 | registry.zig:6,177-193; counter.zig:25-31 | [#23](https://gitlab.com/devnw/zig/metrics/-/work_items/23) | Dupe into registry allocator + free in deinit (or document borrow on all four init/register + fix README) | <benji@vester.by> | 2026-09-09 | Open |
-| 3 | Medium | 36 | Unbounded metric cardinality — no cap/eviction; OOM DoS if caller derives names from untrusted input | registry.zig | CWE-770/400, A04:2021 | registry.zig:177-279 | [#29](https://gitlab.com/devnw/zig/metrics/-/work_items/29) | Optional `RegistryOptions.max_metrics` + `error.CardinalityLimitExceeded` + README guidance | <benji@vester.by> | 2026-09-09 | Open |
-| 4 | Medium | 24 | CI catalog security components pinned v1.7.1 vs sibling thread-pool v1.25.1 (18-version drift) | .gitlab-ci.yml | A06:2021, CIS-16 | .gitlab-ci.yml:10-24 | [#35](https://gitlab.com/devnw/zig/metrics/-/work_items/35) | Bump to v1.25.1 (or current) | <benji@vester.by> | 2026-09-09 | Open |
-| 5 | Low | 12 | CI/CD hardening bundle: (a) debian:bookworm-slim images unpinned by digest; (b) zig index.json TOFU; (c) ZIG_VERSION overridable; (d) cached zig skips SHA re-verify; (e) no gitleaks pre-commit hook | .gitlab-ci.yml, .pre-commit-config.yaml | A06/A08:2021, CIS-16 | .gitlab-ci.yml:27,42-76,88-178; .pre-commit-config.yaml | [#36](https://gitlab.com/devnw/zig/metrics/-/work_items/36) | Pin digests; pin index/tarball SHAs; protect ZIG_VERSION; re-verify cache; add gitleaks hook | <benji@vester.by> | 2026-12-08 | Open |
-| 6 | Low | 8 | Histogram `le`/`_sum` fixed `{d:.6}` precision collapses distinct sub-1e-6 buckets into identical `le` labels → malformed exposition | prometheus.zig, histogram.zig | CWE-682/684 | prometheus.zig:61,65; histogram.zig:79-85 | [#30](https://gitlab.com/devnw/zig/metrics/-/work_items/30) | Shortest-round-trip float format for `le`/`_sum`; regression test {1e-7,2e-7,1.0} | <benji@vester.by> | 2026-12-08 | Open |
-| 7 | Info | 4 | `detect_diamond_deps.py` interpolates `.hash` into filesystem paths without validation; read-only parse of arbitrary `build.zig.zon`-named files | scripts/detect_diamond_deps.py | CWE-22 (defense-in-depth) | scripts/detect_diamond_deps.py:178-184,210 | doc-only | Validate hash `^[A-Za-z0-9._-]+$` before path join | <benji@vester.by> | backlog | Open |
+No open security findings remain.
 
 ## Findings by Area
 
-- **Memory safety (auth/lifecycle):** S-017 (dangling name/help pointers), S-018 (uninitialized snapshot entries / OOB read).
-- **Resource control / DoS:** S-019 (unbounded cardinality → OOM).
-- **Exposition integrity (output/input):** S-020 (malformed `le` labels).
-- **Supply chain:** S-021 (stale CI catalog components).
-- **CI/CD & ops:** S-022 (image digests, index TOFU, version override, cache re-verify, gitleaks pre-commit hook), S-023 (path-traversal defense-in-depth in dependency-audit script).
+- **Memory safety (auth/lifecycle):** S-017 **Closed** (c362468), S-018 **Closed** (52924f8 + 2c207d3).
+- **Resource control / DoS:** S-019 **Closed** (6f3a694).
+- **Exposition integrity (output/input):** S-020 **Closed** (81f0b9d).
+- **Supply chain:** S-021 **Closed** (0e6e880).
+- **CI/CD & ops:** S-022 **Closed** (0e6e880) — S-022(b) index TOFU Won't Do (strategic, see resolved notes). S-023 **Closed** (1066c72).
 
 ## Roadmap
 
-- **Quick wins (< 1 day):** S-021 (bump component pins), S-022(e) gitleaks pre-commit hook, S-022(a) image digest pins, S-023 hash regex validation, S-020 float format swap.
-- **Medium (1-5 days):** S-018 (submit-result check + pre-zero entries + partial-submit regression test), S-017 (dupe name/help + leak-checked test), S-019 (`max_metrics` option + cap test), S-022(c)(d) ZIG_VERSION protection + cache re-verify.
-- **Strategic (> 5 days):** S-022(b) index.json/tarball SHA pinning strategy across devnw/zig repos; cross-repo CI component pin synchronization with quality Q-020.
+No open roadmap items. All sprint security items resolved.
 
 ## Resolved / Closed Findings
 
@@ -75,6 +59,13 @@ Last updated: 2026-06-11
 | S-014 | Medium | Prometheus HELP text backslash not escaped (CWE-116) | **Closed** | Extended `validateHelp()` to reject backslash characters. Prevents Prometheus parser confusion from unescaped `\` sequences. |
 | S-015 | Low | validateHelp did not reject carriage return (CWE-93) | **Closed** | Extended `validateHelp()` to reject `\r` alongside `\n`. Prevents CRLF injection edge cases. |
 | S-016 | Low | Cross-type metric name collision (CWE-694) | **Closed** | Added `nameInUse()` checking all 4 maps. Prevents duplicate `# TYPE` declarations in Prometheus output. |
+| S-017 | Medium | Borrowed name/help stored by reference; dangling-pointer dereference (CWE-416/825) | **Closed** | Commit c362468: all four register fns (`counter`/`gauge`/`histogram`/`timer`) now `dupe` name/help into the registry allocator; `deinit` frees owned strings. Regression test added (`tests/integration.zig`: "registry owns name/help copies; caller may free originals"). Issue [#23](https://gitlab.com/devnw/zig/metrics/-/work_items/23) closed 2026-06-11. |
+| S-018 | High | `parallelSnapshot` partial batch submission leaves uninitialized snapshot entries (CWE-908/125) | **Closed** | Commits 52924f8 + 2c207d3: `wg.wait()` drains before error propagation; `error.SnapshotIncomplete` returned when `submitted != total_tasks`. Saturation regression test added (`tests/integration.zig`: "thread_pool: parallelSnapshot never returns garbage entries under pool saturation"). Issue [#21](https://gitlab.com/devnw/zig/metrics/-/work_items/21) closed 2026-06-11. |
+| S-019 | Medium | Unbounded metric cardinality → OOM DoS (CWE-770/400) | **Closed** | Commit 6f3a694: `RegistryOptions.max_metrics` (default null = unlimited) added; `error.CardinalityLimitExceeded` returned before any allocation. README guidance added. Tests added. Issue [#29](https://gitlab.com/devnw/zig/metrics/-/work_items/29) closed 2026-06-11. |
+| S-020 | Low | Histogram `le`/`_sum` fixed `{d:.6}` precision collapses distinct sub-1e-6 buckets (CWE-682/684) | **Closed** | Commit 81f0b9d: changed to `{d}` (shortest-round-trip float format) for `le` labels and `_sum`; regression test `{1e-7, 2e-7, 1.0}` added. Issue [#30](https://gitlab.com/devnw/zig/metrics/-/work_items/30) closed 2026-06-11. |
+| S-021 | Medium | CI catalog security components pinned v1.7.1 vs org-standard v1.25.1 (18-version drift) | **Closed** | Commit 0e6e880: bumped `.gitlab-ci.yml` catalog component pins to v1.25.1. Issue [#35](https://gitlab.com/devnw/zig/metrics/-/work_items/35) closed 2026-06-11. |
+| S-022 | Low | CI/CD hardening bundle: (a) image digests, (b) index.json TOFU, (c) ZIG_VERSION override, (d) cache re-verify, (e) gitleaks pre-commit hook | **Closed (with Won't Do note)** | Commit 0e6e880: (a) debian:bookworm-slim images pinned by digest, (c) ZIG_VERSION protected, (d) cached zig re-verified, (e) gitleaks pre-commit hook added. **(b) index.json TOFU remains Won't Do** — strategic cross-repo SHA pinning requires coordinated infrastructure work across devnw/zig repos; tracked as a future improvement, not an active open gap. Issue [#36](https://gitlab.com/devnw/zig/metrics/-/work_items/36) closed 2026-06-11 with the Won't Do note on (b) recorded. |
+| S-023 | Info | `detect_diamond_deps.py` interpolates `.hash` into filesystem paths without validation (CWE-22) | **Closed** | Commit 1066c72: added `^[A-Za-z0-9._-]+$` regex validation before path join in `scripts/detect_diamond_deps.py`. Issue tracked doc-only; closed 2026-06-11. |
 
 ## Secret Scan Results
 

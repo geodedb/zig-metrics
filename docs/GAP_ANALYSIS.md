@@ -2,92 +2,11 @@
 
 Last updated: 2026-06-11
 
-Repository status: core metrics library implemented with consolidated API.
+Repository status: core metrics library implemented with consolidated API. All functional gaps closed as of 2026-06-11.
 
 ## Open Gaps
 
-Functional gaps currently open. Each links to its GitLab issue (source of truth).
-
-### GAP-005: Benchmarks fail to compile on Zig 0.16 (std.process.args removed)
-
-- **Issue:** [#19](https://gitlab.com/devnw/zig/metrics/-/issues/19)
-- **Category:** Bug
-- **Severity:** High
-- **Status:** Open
-- **Requirement source:** build.zig.zon:5 (`minimum_zig_version = "0.16.0"`); Makefile bench targets (`bench-save`, `bench-baseline`, `bench-compare`, `scale-bench`)
-- **Current state (evidence):**
-  - benchmarks/scale_bench.zig:120 -- `var args = std.process.args();`
-  - benchmarks/compare.zig:95 -- `var args = std.process.args();`
-  - Compile error: `root source file struct 'process' has no member named 'args'`
-  - Correct 0.16 pattern in zig-pkg/thread_pool-0.2.5-*/benchmarks/common.zig:67 (`parseOutputArg(allocator, args: std.process.Args)` using `args.toSlice(allocator)`)
-- **Why this is a gap:** `std.process.args()` was removed in Zig 0.16, but the package's `minimum_zig_version` is 0.16.0; benchmarks do not build on the supported toolchain.
-- **Impact/Risk:** Breaks `make bench-save`/`bench-baseline`/`bench-compare`/`scale-bench`; perf regression gating non-functional; no compile-only bench check in CI to catch it.
-- **Recommended fix:** Port both benchmark args parsers to the Zig 0.16 allocator-based `std.process.Args` pattern (mirror thread_pool common.zig:67); add a compile-only benchmark check to CI.
-- **Acceptance criteria:** both benchmarks compile and run on Zig 0.16; `make bench-compare` works end-to-end; CI gains a compile-only bench check.
-- **Cross-reference:** Same root cause as perf review P-020 -- single issue, tracked here functionally and in the perf gap analysis from the perf angle.
-
-### GAP-006: No prose docs for registry lifecycle / parallelSnapshot
-
-- **Issue:** [#11](https://gitlab.com/devnw/zig/metrics/-/issues/11) (MET-DOC-001)
-- **Category:** Docs
-- **Severity:** Medium
-- **Status:** Open
-- **Requirement source:** docs/REQUIREMENTS.md -- Documentation Requirements (document the collector/registry model)
-- **Current state (evidence):**
-  - docs/README.md is an 18-line stub -- only points at the docs/ directory.
-  - Registry lifecycle, thread-safety, snapshot model, and `Registry.parallelSnapshot(pool)` are described only in src/registry.zig doc comments, not in prose docs.
-- **Why this is a gap:** The public Registry API exists and is tested, but no user-facing prose documents its lifecycle, ownership, thread-safety, or the spice-accelerated parallel snapshot path.
-- **Impact/Risk:** Consumers lack guidance on init/deinit, memory ownership, RwLock guarantees, and when to use `parallelSnapshot`.
-- **Recommended fix:** Add a Registry documentation page/section covering lifecycle, thread-safety (RwLock shared/exclusive), memory ownership, and `parallelSnapshot`.
-- **Acceptance criteria:** docs describe Registry API + init/deinit lifecycle; thread-safety guarantees documented; memory ownership documented; `parallelSnapshot(pool)` documented; docs/README.md expanded beyond the 18-line stub.
-
-### GAP-007: No prose docs for Prometheus export behavior
-
-- **Issue:** [#12](https://gitlab.com/devnw/zig/metrics/-/issues/12) (MET-DOC-002)
-- **Category:** Docs
-- **Severity:** Medium
-- **Status:** Open
-- **Requirement source:** docs/REQUIREMENTS.md -- Documentation Requirements (document Prometheus export behavior)
-- **Current state (evidence):**
-  - docs/README.md is an 18-line stub; no doc describes the export path.
-  - `writePrometheus(registry, writer)` is implemented/tested in src/prometheus.zig, but the snapshot-then-write flow, output format structure (HELP/TYPE lines, histogram bucket/`_sum`/`_count`, text exposition 0.0.4), and empty-registry behavior are undocumented in prose.
-- **Why this is a gap:** Export works but consumers have no prose spec/examples for the format or edge cases.
-- **Impact/Risk:** Consumers cannot predict output format or empty-registry behavior without reading source.
-- **Recommended fix:** Add a Prometheus export documentation section: snapshot-then-write flow, format structure, empty-registry behavior, and `writePrometheus` usage examples.
-- **Acceptance criteria:** docs describe export behavior; snapshot-then-write flow documented; output format structure specified (HELP/TYPE, histogram bucket/`_sum`/`_count`); empty-registry behavior documented; `writePrometheus` shown with examples.
-
-### GAP-008: README missing writer-pattern / BYO-HTTP section
-
-- **Issue:** [#13](https://gitlab.com/devnw/zig/metrics/-/issues/13) (MET-DOC-003)
-- **Category:** Docs
-- **Severity:** Low
-- **Status:** Open
-- **Requirement source:** docs/REQUIREMENTS.md -- Documentation Requirements (document that the HTTP server is an adapter, not core); docs/GAP_ANALYSIS.md Intended Boundary table
-- **Current state (evidence):**
-  - README.md has no section explaining the library is transport-agnostic and that `writePrometheus` accepts any writer (BYO-HTTP).
-  - The boundary is noted in this doc's Intended Boundary table but not surfaced to users in the README.
-- **Why this is a gap:** Consumers have no README guidance on the writer pattern or how to bring their own HTTP transport.
-- **Impact/Risk:** Users may assume HTTP serving is built in, or not realize `writePrometheus` accepts any writer.
-- **Recommended fix:** Add a README writer-pattern / BYO-HTTP section with an example wiring `writePrometheus` to an HTTP handler.
-- **Acceptance criteria:** README states the library does not include HTTP transport; documents the writer pattern; includes an example wiring `writePrometheus` to an HTTP handler.
-
-### GAP-009: README version claims stale (badge / install URL / Requirements)
-
-- **Issue:** [#20](https://gitlab.com/devnw/zig/metrics/-/issues/20)
-- **Category:** Docs
-- **Severity:** Low
-- **Status:** Open
-- **Requirement source:** build.zig.zon:3 (`version = "0.1.3"`); build.zig.zon:5 (`minimum_zig_version = "0.16.0"`)
-- **Current state (evidence):**
-  - README.md:4 -- badge `Zig-0.15.1+` (should be 0.16.0)
-  - README.md:24 -- install URL pins `.../archive/v0.1.0/metrics-v0.1.0.tar.gz` (package is 0.1.3)
-  - README.md:75 -- Requirements: `Zig 0.15.1 or later` (should be 0.16.0)
-  - vs build.zig.zon:3 (`version = 0.1.3`) and build.zig.zon:5 (`minimum_zig_version = 0.16.0`)
-- **Why this is a gap:** README advertises Zig 0.15.1 and a v0.1.0 archive while the package requires 0.16.0 and is at 0.1.3.
-- **Impact/Risk:** Users on Zig 0.15.1 hit build failures the README implies are supported; the pinned v0.1.0 install URL fetches a stale release. Documentation-only, no runtime impact.
-- **Recommended fix:** Update README badge to 0.16.0+, install URL to v0.1.3, and Requirements to Zig 0.16.0 or later.
-- **Acceptance criteria:** README Zig badge matches minimum_zig_version (0.16.0); install URL points at v0.1.3; Requirements states Zig 0.16.0 or later; all README version claims consistent with build.zig.zon.
-- **Cross-reference:** The in-source version-constant drift at src/root.zig:36 (`pub const version = "0.1.0"`) is tracked separately by the quality review as MQ-003; GAP-009 covers README docs drift only.
+No open functional gaps remain. All items from GAP-005 through GAP-009 were closed in the 2026-06-11 gap-closure sprint. See `GAP_ANALYSIS_RESOLVED.md` for full resolution evidence.
 
 ---
 
