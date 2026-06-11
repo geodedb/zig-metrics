@@ -58,11 +58,11 @@ fn writeHistogram(entry: *const MetricSnapshot, writer: anytype) !void {
     var cumulative: u64 = 0;
     for (entry.hist_buckets, entry.hist_bucket_counts) |bucket, count| {
         cumulative += count;
-        try writer.print("{s}_bucket{{le=\"{d:.6}\"}} {d}\n", .{ entry.name, bucket, cumulative });
+        try writer.print("{s}_bucket{{le=\"{d}\"}} {d}\n", .{ entry.name, bucket, cumulative });
     }
 
     try writer.print("{s}_bucket{{le=\"+Inf\"}} {d}\n", .{ entry.name, entry.hist_count });
-    try writer.print("{s}_sum {d:.6}\n", .{ entry.name, entry.hist_sum });
+    try writer.print("{s}_sum {d}\n", .{ entry.name, entry.hist_sum });
     try writer.print("{s}_count {d}\n", .{ entry.name, entry.hist_count });
 }
 
@@ -131,9 +131,9 @@ test "Prometheus: histogram per-bucket cumulative output" {
     const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "# TYPE latency_seconds histogram\n") != null);
     // Per-bucket counts: [1, 1, 0]. Cumulative: le=0.1:1, le=0.5:2, le=1.0:2
-    try std.testing.expect(std.mem.indexOf(u8, output, "latency_seconds_bucket{le=\"0.100000\"} 1\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "latency_seconds_bucket{le=\"0.500000\"} 2\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "latency_seconds_bucket{le=\"1.000000\"} 2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "latency_seconds_bucket{le=\"0.1\"} 1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "latency_seconds_bucket{le=\"0.5\"} 2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "latency_seconds_bucket{le=\"1\"} 2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "latency_seconds_bucket{le=\"+Inf\"} 3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "latency_seconds_count 3\n") != null);
 }
@@ -169,4 +169,29 @@ test "Prometheus: multiple metrics in output" {
     const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "c1") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "g1") != null);
+}
+
+test "Prometheus: sub-microsecond bucket bounds stay distinct in le labels (S-020)" {
+    var reg = Registry.init(std.testing.allocator);
+    defer reg.deinit();
+
+    const buckets = [_]f64{ 1e-7, 2e-7, 1.0 };
+    const h = try reg.histogram("tiny_seconds", "Tiny", &buckets);
+    h.observe(1.5e-7); // second bucket
+
+    var buf: [8192]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try writePrometheus(&reg, &writer);
+
+    const output = writer.buffered();
+    // With {d:.6} both bounds collapsed to le="0.000000". Shortest
+    // round-trip must keep them textually distinct.
+    const needle = "tiny_seconds_bucket{le=\"";
+    const first = std.mem.indexOf(u8, output, needle) orelse return error.TestUnexpectedResult;
+    const second = std.mem.indexOfPos(u8, output, first + 1, needle) orelse return error.TestUnexpectedResult;
+    const first_end = std.mem.indexOfPos(u8, output, first, "\"}") orelse return error.TestUnexpectedResult;
+    const second_end = std.mem.indexOfPos(u8, output, second, "\"}") orelse return error.TestUnexpectedResult;
+    const label_a = output[first + needle.len .. first_end];
+    const label_b = output[second + needle.len .. second_end];
+    try std.testing.expect(!std.mem.eql(u8, label_a, label_b));
 }
