@@ -25,12 +25,12 @@ pub const Timer = struct {
     /// Create a new timer with the given name, help text, and bucket boundaries.
     pub fn init(
         allocator: std.mem.Allocator,
-        name: []const u8,
-        help: []const u8,
+        metric_name: []const u8,
+        metric_help: []const u8,
         buckets: []const f64,
     ) (Histogram.BucketError || error{OutOfMemory})!Timer {
         return .{
-            .histogram = try Histogram.init(allocator, name, help, buckets),
+            .histogram = try Histogram.init(allocator, metric_name, metric_help, buckets),
         };
     }
 
@@ -67,6 +67,22 @@ pub const Timer = struct {
     /// Return the sum of all recorded durations in seconds.
     pub fn getSum(self: *const Timer) f64 {
         return self.histogram.getSum();
+    }
+
+    /// Return the timer's metric name (delegates to the inner histogram).
+    pub fn name(self: *const Timer) []const u8 {
+        return self.histogram.name;
+    }
+
+    /// Return the timer's help text (delegates to the inner histogram).
+    pub fn help(self: *const Timer) []const u8 {
+        return self.histogram.help;
+    }
+
+    /// Return the observation count of bucket `index` (delegates to the
+    /// inner histogram; per-bucket, not cumulative).
+    pub fn getBucketCount(self: *const Timer, index: usize) u64 {
+        return self.histogram.getBucketCount(index);
     }
 
     /// An in-flight timing measurement.
@@ -149,6 +165,16 @@ test "Timer: default_timer_buckets is sorted" {
     for (0..default_timer_buckets.len - 1) |i| {
         try std.testing.expect(default_timer_buckets[i] < default_timer_buckets[i + 1]);
     }
+}
+
+test "Timer: accessors delegate to inner histogram (Q-029)" {
+    const allocator = std.testing.allocator;
+    var t = try Timer.init(allocator, "acc_timer", "Accessor test", default_timer_buckets);
+    defer t.deinit();
+    t.recordSeconds(0.002);
+    try std.testing.expectEqualStrings("acc_timer", t.name());
+    try std.testing.expectEqualStrings("Accessor test", t.help());
+    try std.testing.expectEqual(@as(u64, 1), t.getBucketCount(1)); // 0.002 <= 0.005, bucket index 1
 }
 
 test "Timer: uses monotonic clock for durations (P-011)" {

@@ -9,6 +9,9 @@
 //! All atomic operations use `.monotonic` ordering -- the weakest and fastest
 //! option. This is correct because counter values are independent scalars with
 //! no cross-field invariants. See `histogram.zig` for a detailed rationale.
+//!
+//! No `deinit` is needed: Counter owns no heap memory. When registered,
+//! the owning Registry destroys the struct on its own deinit.
 
 const std = @import("std");
 

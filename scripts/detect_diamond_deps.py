@@ -50,7 +50,9 @@ Deliberately NOT in scope
     recommended manual fix workflow.
 *   Validating the package-hash format itself.  We trust whatever
     `build.zig.zon` records; the check is only "two hashes for the
-    same name == bad".
+    same name == bad".  (Hashes are still sanity-checked before being
+    joined into filesystem paths — see `_safe_hash` — but only to
+    block path traversal, not to validate the Zig hash format.)
 """
 
 from __future__ import annotations
@@ -61,6 +63,14 @@ import sys
 from pathlib import Path
 from collections import defaultdict
 from typing import Dict, List, Set, Tuple
+
+_HASH_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _safe_hash(pkg_hash: str) -> bool:
+    """Reject hashes that could traverse outside the package roots (CWE-22)."""
+    return bool(_HASH_RE.fullmatch(pkg_hash)) and ".." not in pkg_hash
+
 
 # build.zig.zon parsing — Zig anonymous-struct literals.
 #
@@ -175,6 +185,10 @@ def _zon_path_for_hash(
     in `$ZIG_GLOBAL_CACHE_DIR/p/<pkg_hash>.tar.gz` (global).  Only the
     project-local extraction has a usable `build.zig.zon` on disk —
     we don't want to untar the global cache here."""
+    # S-023: a hostile build.zig.zon could record a hash like
+    # "../../../etc" — never join it into a path unvalidated.
+    if not _safe_hash(pkg_hash):
+        return None
     candidate = project_root / "zig-pkg" / pkg_hash / "build.zig.zon"
     if candidate.exists():
         return candidate

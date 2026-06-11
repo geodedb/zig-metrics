@@ -199,6 +199,12 @@ pub const Registry = struct {
         self.rwlock.lock();
         defer self.rwlock.unlock();
 
+        // Q-029: nameInUse + the later `put` form a check-then-insert pair
+        // that is atomic ONLY because every register fn holds the exclusive
+        // lock for the whole sequence. Do not split the check and the
+        // insert across lock domains (e.g. check under a shared lock, then
+        // re-acquire exclusive to insert) — that reintroduces a TOCTOU
+        // duplicate-registration race.
         if (self.nameInUse(name)) return error.AlreadyRegistered;
         if (self.options.max_metrics) |cap| {
             if (self.countLocked() >= cap) return error.CardinalityLimitExceeded;
@@ -441,28 +447,12 @@ pub const Registry = struct {
             }
         }
 
-        // Task context types for the background captures. Gauges stay
-        // single-task (per-gauge work is O(1)). Histograms and timers
-        // are sharded into `ceil(count / snapshot_chunk_size)` sub-tasks
-        // so large registries spread capture work across many workers
-        // rather than starving everyone but one.
-        const GaugeCtx = struct {
-            gauges: *std.StringHashMap(*Gauge),
-            out: []snapshot_mod.MetricSnapshot,
-        };
-        const HistCtx = struct {
-            entries: []const HistEntry,
-            out: []snapshot_mod.MetricSnapshot,
-            counts: []u64,
-            bounds: []f64,
-        };
-        const TimerCtx = struct {
-            entries: []const TimerEntry,
-            out: []snapshot_mod.MetricSnapshot,
-            counts: []u64,
-            bounds: []f64,
-        };
-
+        // Histograms and timers are sharded into
+        // `ceil(count / snapshot_chunk_size)` sub-tasks (see GaugeCtx/
+        // HistCtx/TimerCtx + buildShards at container scope) so large
+        // registries spread capture work across many workers rather
+        // than starving everyone but one.
+        //
         // Treat chunk==0 as "no sharding" (collapse to a single task per
         // type) so a caller that sets snapshot_chunk_size=0 gets safe
         // behavior rather than a division-by-zero.
@@ -527,14 +517,14 @@ pub const Registry = struct {
         const hist_run = struct {
             fn run(ctx: *anyopaque, _: *tp.TaskContext) void {
                 const c: *HistCtx = @ptrCast(@alignCast(ctx));
-                captureHistSlice(c.entries, c.out, c.counts, c.bounds, .histogram);
+                captureMetricSlice(HistEntry, c.entries, c.out, c.counts, c.bounds, .histogram);
             }
         }.run;
 
         const timer_run = struct {
             fn run(ctx: *anyopaque, _: *tp.TaskContext) void {
                 const c: *TimerCtx = @ptrCast(@alignCast(ctx));
-                captureTimerSlice(c.entries, c.out, c.counts, c.bounds);
+                captureMetricSlice(TimerEntry, c.entries, c.out, c.counts, c.bounds, .timer);
             }
         }.run;
 
@@ -542,56 +532,40 @@ pub const Registry = struct {
         tasks[task_idx] = .{ .task_fn = gauge_run, .ctx = &gauge_ctx };
         task_idx += 1;
 
-        // Build histogram shard contexts. Each shard gets a disjoint
-        // slice of hist_entry_list, a disjoint sub-slice of the output
-        // MetricSnapshot entries, and a disjoint sub-slice of the
-        // counts/bounds storage (sized to the sum of bucket lengths
-        // for the histograms in this shard).
-        {
-            var entry_off: usize = 0;
-            var bucket_off: usize = 0;
-            var shard: usize = 0;
-            while (shard < hist_chunks) : (shard += 1) {
-                const shard_end = @min(entry_off + chunk, hist_count);
-                const shard_entries = hist_entry_list[entry_off..shard_end];
-                // Sum bucket lengths for this shard.
-                var shard_buckets: usize = 0;
-                for (shard_entries) |e| shard_buckets += e.hist.buckets.len;
-                hist_ctxs[shard] = .{
-                    .entries = shard_entries,
-                    .out = hist_entries[entry_off..shard_end],
-                    .counts = hist_bucket_counts[bucket_off .. bucket_off + shard_buckets],
-                    .bounds = hist_bucket_bounds[bucket_off .. bucket_off + shard_buckets],
-                };
-                tasks[task_idx] = .{ .task_fn = hist_run, .ctx = &hist_ctxs[shard] };
-                task_idx += 1;
-                entry_off = shard_end;
-                bucket_off += shard_buckets;
-            }
-        }
-
-        // Build timer shard contexts (same sharding strategy as hist).
-        {
-            var entry_off: usize = 0;
-            var bucket_off: usize = 0;
-            var shard: usize = 0;
-            while (shard < timer_chunks) : (shard += 1) {
-                const shard_end = @min(entry_off + chunk, timer_count);
-                const shard_entries = timer_entry_list[entry_off..shard_end];
-                var shard_buckets: usize = 0;
-                for (shard_entries) |e| shard_buckets += e.timer.histogram.buckets.len;
-                timer_ctxs[shard] = .{
-                    .entries = shard_entries,
-                    .out = timer_entries[entry_off..shard_end],
-                    .counts = timer_bucket_counts[bucket_off .. bucket_off + shard_buckets],
-                    .bounds = timer_bucket_bounds[bucket_off .. bucket_off + shard_buckets],
-                };
-                tasks[task_idx] = .{ .task_fn = timer_run, .ctx = &timer_ctxs[shard] };
-                task_idx += 1;
-                entry_off = shard_end;
-                bucket_off += shard_buckets;
-            }
-        }
+        // Build histogram and timer shard contexts (Q-026: shared
+        // buildShards helper). Each shard gets a disjoint slice of the
+        // entry list, a disjoint sub-slice of the output MetricSnapshot
+        // entries, and a disjoint sub-slice of the counts/bounds storage
+        // (sized to the sum of bucket lengths for the metrics in that
+        // shard).
+        buildShards(
+            HistEntry,
+            HistCtx,
+            hist_entry_list,
+            hist_entries,
+            hist_bucket_counts,
+            hist_bucket_bounds,
+            chunk,
+            hist_chunks,
+            hist_ctxs,
+            tasks,
+            &task_idx,
+            hist_run,
+        );
+        buildShards(
+            TimerEntry,
+            TimerCtx,
+            timer_entry_list,
+            timer_entries,
+            timer_bucket_counts,
+            timer_bucket_bounds,
+            chunk,
+            timer_chunks,
+            timer_ctxs,
+            tasks,
+            &task_idx,
+            timer_run,
+        );
 
         // Fan-out gauges, histogram-shards, timer-shards to the thread
         // pool. `wg` ensures the worker captures complete before we
@@ -651,8 +625,81 @@ pub const Registry = struct {
     /// Lightweight view into a registered timer. See `HistEntry`.
     const TimerEntry = struct { timer: *Timer };
 
-    fn captureHistSlice(
+    /// Task context for the single gauge-capture task in
+    /// `parallelSnapshot`. Gauges stay single-task (per-gauge work
+    /// is O(1)).
+    const GaugeCtx = struct {
+        gauges: *std.StringHashMap(*Gauge),
+        out: []snapshot_mod.MetricSnapshot,
+    };
+
+    /// Task context for one histogram-capture shard in
+    /// `parallelSnapshot`.
+    const HistCtx = struct {
         entries: []const HistEntry,
+        out: []snapshot_mod.MetricSnapshot,
+        counts: []u64,
+        bounds: []f64,
+    };
+
+    /// Task context for one timer-capture shard in `parallelSnapshot`.
+    const TimerCtx = struct {
+        entries: []const TimerEntry,
+        out: []snapshot_mod.MetricSnapshot,
+        counts: []u64,
+        bounds: []f64,
+    };
+
+    /// Build shard contexts + tasks for one metric family (histograms or
+    /// timers): fills ctxs[0..chunks] and appends one task per shard.
+    fn buildShards(
+        comptime Entry: type,
+        comptime Ctx: type,
+        entry_list: []const Entry,
+        out_entries: []snapshot_mod.MetricSnapshot,
+        bucket_counts: []u64,
+        bucket_bounds: []f64,
+        chunk: usize,
+        chunks: usize,
+        ctxs: []Ctx,
+        tasks: []tp.BatchTask,
+        task_idx: *usize,
+        run_fn: *const fn (*anyopaque, *tp.TaskContext) void,
+    ) void {
+        const count = entry_list.len;
+        var entry_off: usize = 0;
+        var bucket_off: usize = 0;
+        var shard: usize = 0;
+        while (shard < chunks) : (shard += 1) {
+            const shard_end = @min(entry_off + chunk, count);
+            const shard_entries = entry_list[entry_off..shard_end];
+            // Sum bucket lengths for this shard.
+            var shard_buckets: usize = 0;
+            for (shard_entries) |e| {
+                const h = if (Entry == HistEntry) e.hist else &e.timer.histogram;
+                shard_buckets += h.buckets.len;
+            }
+            ctxs[shard] = .{
+                .entries = shard_entries,
+                .out = out_entries[entry_off..shard_end],
+                .counts = bucket_counts[bucket_off .. bucket_off + shard_buckets],
+                .bounds = bucket_bounds[bucket_off .. bucket_off + shard_buckets],
+            };
+            tasks[task_idx.*] = .{ .task_fn = run_fn, .ctx = &ctxs[shard] };
+            task_idx.* += 1;
+            entry_off = shard_end;
+            bucket_off += shard_buckets;
+        }
+    }
+
+    /// Capture one shard of histogram-shaped metrics (histograms or
+    /// timers) into the snapshot output slices. Comptime-generic over
+    /// the entry type so the histogram and timer paths cannot drift
+    /// (Q-025): both reduce to "copy bucket counts/bounds, then fill
+    /// the MetricSnapshot from the underlying histogram".
+    fn captureMetricSlice(
+        comptime Entry: type,
+        entries: []const Entry,
         out: []snapshot_mod.MetricSnapshot,
         counts: []u64,
         bounds: []f64,
@@ -660,7 +707,7 @@ pub const Registry = struct {
     ) void {
         var offset: usize = 0;
         for (entries, 0..) |e, idx| {
-            const h = e.hist;
+            const h = if (Entry == HistEntry) e.hist else &e.timer.histogram;
             const blen = h.buckets.len;
             const count_slice = counts[offset .. offset + blen];
             const bound_slice = bounds[offset .. offset + blen];
@@ -672,36 +719,6 @@ pub const Registry = struct {
                 .name = h.name,
                 .help = h.help,
                 .kind = kind,
-                .hist_count = h.getCount(),
-                .hist_sum = h.getSum(),
-                .hist_buckets = bound_slice,
-                .hist_bucket_counts = count_slice,
-            };
-            offset += blen;
-        }
-    }
-
-    fn captureTimerSlice(
-        entries: []const TimerEntry,
-        out: []snapshot_mod.MetricSnapshot,
-        counts: []u64,
-        bounds: []f64,
-    ) void {
-        var offset: usize = 0;
-        for (entries, 0..) |e, idx| {
-            const t = e.timer;
-            const h = &t.histogram;
-            const blen = h.buckets.len;
-            const count_slice = counts[offset .. offset + blen];
-            const bound_slice = bounds[offset .. offset + blen];
-            for (0..blen) |i| {
-                count_slice[i] = h.getBucketCount(i);
-                bound_slice[i] = h.buckets[i];
-            }
-            out[idx] = .{
-                .name = h.name,
-                .help = h.help,
-                .kind = .timer,
                 .hist_count = h.getCount(),
                 .hist_sum = h.getSum(),
                 .hist_buckets = bound_slice,
