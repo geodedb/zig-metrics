@@ -299,6 +299,7 @@ test "thread_pool: parallelSnapshot never returns garbage entries under pool sat
             // A surprise success is fine only if fully initialized.
             try std.testing.expectEqual(@as(usize, 32), snap.len());
             for (snap.entries) |*entry| {
+                if (entry.kind != .histogram) continue;
                 try std.testing.expect(entry.name.len >= 7); // "sat_h_N"
                 try std.testing.expect(std.mem.startsWith(u8, entry.name, "sat_h_"));
                 try std.testing.expectEqual(@as(u64, 1), entry.hist_count);
@@ -320,13 +321,14 @@ test "thread_pool: parallelSnapshot never returns garbage entries under pool sat
         var successes: usize = 0;
         for (0..50) |_| {
             var snap = reg.parallelSnapshot(&pool) catch |err| switch (err) {
-                error.SnapshotIncomplete => continue,
-                else => continue,
+                error.SnapshotIncomplete => return error.TestUnexpectedResult, // healthy pool must accept full batch
+                else => continue, // transient pool errors tolerated
             };
             defer snap.deinit();
             successes += 1;
             try std.testing.expectEqual(@as(usize, 32), snap.len());
             for (snap.entries) |*entry| {
+                if (entry.kind != .histogram) continue;
                 try std.testing.expect(entry.name.len >= 7); // "sat_h_N"
                 try std.testing.expect(std.mem.startsWith(u8, entry.name, "sat_h_"));
                 try std.testing.expectEqual(@as(u64, 1), entry.hist_count);

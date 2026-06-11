@@ -589,10 +589,11 @@ pub const Registry = struct {
 
         wg.wait();
 
-        // S-018: under .return_error backpressure submitBatch can accept
-        // only part of the batch without raising an error. Unsubmitted
-        // shards never ran, so their output slots are uninitialized --
-        // returning them would hand the caller wild name/help pointers.
+        // S-018: under .return_error backpressure or pool shutdown mid-batch
+        // submitBatch can accept only part of the batch without raising an
+        // error. Unsubmitted shards never ran, so their output slots are
+        // uninitialized — returning them would hand the caller wild
+        // name/help pointers.
         if (submit_result.submitted != total_tasks) return error.SnapshotIncomplete;
 
         return .{
