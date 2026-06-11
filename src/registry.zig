@@ -53,6 +53,8 @@ const snapshot_mod = @import("snapshot.zig");
 const Snapshot = snapshot_mod.Snapshot;
 
 /// Errors that can occur during metric registration.
+/// Bucket validation errors are composed directly from
+/// `Histogram.BucketError` so the two sets cannot drift (Q-024).
 pub const RegistryError = error{
     /// A metric with the given name already exists.
     AlreadyRegistered,
@@ -62,15 +64,9 @@ pub const RegistryError = error{
     InvalidMetricName,
     /// Help text contains unescaped newlines.
     InvalidHelpText,
-    /// Histogram buckets are empty.
-    EmptyBuckets,
-    /// Histogram buckets are not sorted in strictly ascending order.
-    UnsortedBuckets,
-    /// Histogram bucket boundary is NaN or Inf.
-    NonFiniteBucket,
     /// The registry's max_metrics cardinality cap has been reached (S-019).
     CardinalityLimitExceeded,
-};
+} || Histogram.BucketError;
 
 /// Tuning knobs for Registry behavior.
 pub const RegistryOptions = struct {
@@ -283,14 +279,7 @@ pub const Registry = struct {
 
         const h = self.allocator.create(Histogram) catch return error.OutOfMemory;
         errdefer self.allocator.destroy(h);
-        h.* = Histogram.init(self.allocator, name_owned, help_owned, buckets) catch |err| {
-            return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.EmptyBuckets => error.EmptyBuckets,
-                error.UnsortedBuckets => error.UnsortedBuckets,
-                error.NonFiniteBucket => error.NonFiniteBucket,
-            };
-        };
+        h.* = try Histogram.init(self.allocator, name_owned, help_owned, buckets);
         errdefer h.deinit();
         self.histograms.put(name_owned, h) catch return error.OutOfMemory;
         return h;
@@ -324,14 +313,7 @@ pub const Registry = struct {
 
         const t = self.allocator.create(Timer) catch return error.OutOfMemory;
         errdefer self.allocator.destroy(t);
-        t.* = Timer.init(self.allocator, name_owned, help_owned, buckets) catch |err| {
-            return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.EmptyBuckets => error.EmptyBuckets,
-                error.UnsortedBuckets => error.UnsortedBuckets,
-                error.NonFiniteBucket => error.NonFiniteBucket,
-            };
-        };
+        t.* = try Timer.init(self.allocator, name_owned, help_owned, buckets);
         errdefer t.deinit();
         self.timers.put(name_owned, t) catch return error.OutOfMemory;
         return t;
