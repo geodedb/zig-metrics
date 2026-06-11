@@ -332,3 +332,18 @@ test "Histogram: Inf bucket rejected" {
     const bad = [_]f64{ 1.0, 2.0, std.math.inf(f64) };
     try std.testing.expectError(error.NonFiniteBucket, Histogram.init(allocator, "test", "help", &bad));
 }
+
+test "Histogram: observation above max bucket counts only in count/sum, no explicit bucket" {
+    const allocator = std.testing.allocator;
+    const buckets = [_]f64{ 1.0, 5.0 };
+    var h = try Histogram.init(allocator, "overflow", "help", &buckets);
+    defer h.deinit();
+
+    h.observe(0.5); // bucket 0
+    h.observe(10.0); // above all bounds: count/sum only
+
+    try std.testing.expectEqual(@as(u64, 2), h.getCount());
+    try std.testing.expectEqual(@as(u64, 1), h.getBucketCount(0));
+    try std.testing.expectEqual(@as(u64, 0), h.getBucketCount(1));
+    try std.testing.expectApproxEqAbs(@as(f64, 10.5), h.getSum(), 1e-10);
+}

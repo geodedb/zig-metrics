@@ -171,6 +171,26 @@ test "Prometheus: multiple metrics in output" {
     try std.testing.expect(std.mem.indexOf(u8, output, "g1") != null);
 }
 
+test "Prometheus: above-max observation appears only in +Inf and _count (Q-027)" {
+    var reg = Registry.init(std.testing.allocator);
+    defer reg.deinit();
+
+    const buckets = [_]f64{ 1.0, 5.0 };
+    const h = try reg.histogram("ovf_seconds", "Overflow", &buckets);
+    h.observe(10.0);
+
+    var buf: [8192]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try writePrometheus(&reg, &writer);
+
+    const output = writer.buffered();
+    // Explicit buckets exclude it; +Inf and _count include it.
+    try std.testing.expect(std.mem.indexOf(u8, output, "ovf_seconds_bucket{le=\"1\"} 0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "ovf_seconds_bucket{le=\"5\"} 0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "ovf_seconds_bucket{le=\"+Inf\"} 1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "ovf_seconds_count 1\n") != null);
+}
+
 test "Prometheus: sub-microsecond bucket bounds stay distinct in le labels (S-020)" {
     var reg = Registry.init(std.testing.allocator);
     defer reg.deinit();

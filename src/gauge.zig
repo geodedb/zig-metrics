@@ -135,3 +135,31 @@ test "Gauge: concurrent inc and dec" {
     // Equal inc and dec should net to zero
     try std.testing.expectEqual(@as(i64, 0), g.get());
 }
+
+test "Gauge: concurrent asymmetric inc/dec nets to exact expected value" {
+    var g = Gauge.init("concurrent_exact", "help");
+    const iterations: usize = 10_000;
+    const inc_threads = 3; // 3 * 10_000 * +1 = +30_000
+    const dec_threads = 1; // 1 * 10_000 * -1 = -10_000
+
+    var threads: [inc_threads + dec_threads]std.Thread = undefined;
+    for (threads[0..inc_threads]) |*t| {
+        t.* = try std.Thread.spawn(.{}, struct {
+            fn run(gauge: *Gauge) void {
+                for (0..iterations) |_| gauge.inc();
+            }
+        }.run, .{&g});
+    }
+    for (threads[inc_threads..]) |*t| {
+        t.* = try std.Thread.spawn(.{}, struct {
+            fn run(gauge: *Gauge) void {
+                for (0..iterations) |_| gauge.dec();
+            }
+        }.run, .{&g});
+    }
+    for (&threads) |*t| t.join();
+
+    // Any lost update breaks this exact total (unlike the symmetric
+    // net-zero test, which broken atomics can still pass by symmetry).
+    try std.testing.expectEqual(@as(i64, 20_000), g.get());
+}

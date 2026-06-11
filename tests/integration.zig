@@ -239,11 +239,11 @@ test "thread_pool: parallelSnapshot shards histograms when count > chunk_size" {
     defer snap.deinit();
     const after = pool.statsSnapshot().submitted;
 
-    // 1 gauge-task + 4 hist-shards + 1 timer-task (timer count 0 → 0
-    // tasks). Minimum is 1 + 4 + 0 = 5; the implementation may emit
-    // >= 5 depending on whether zero-count types are elided. The
-    // baseline (pre-sharding) only submits 3 tasks total.
-    try std.testing.expect(after - before >= 5);
+    // 1 gauge-task + ceil(16/4)=4 hist-shards + 1 timer-task: empty
+    // metric types still emit one task each (registry.zig forces
+    // timer_chunks = 1 when timer_count == 0), so exactly 6 tasks.
+    // The pre-sharding baseline submitted only 3.
+    try std.testing.expectEqual(@as(u64, 6), after - before);
 
     // Snapshot content sanity: all 16 histograms must be captured with
     // the observed values preserved.

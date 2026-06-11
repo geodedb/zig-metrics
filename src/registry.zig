@@ -916,6 +916,7 @@ test "Registry: max_metrics cap rejects registration beyond limit (S-019)" {
     try std.testing.expectError(error.CardinalityLimitExceeded, reg.counter("c4", "help"));
     const buckets = [_]f64{1.0};
     try std.testing.expectError(error.CardinalityLimitExceeded, reg.histogram("h1", "help", &buckets));
+    try std.testing.expectError(error.CardinalityLimitExceeded, reg.timer("t1", "help", &buckets));
     try std.testing.expectEqual(@as(usize, 3), reg.metricCount());
 }
 
