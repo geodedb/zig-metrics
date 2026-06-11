@@ -68,6 +68,8 @@ pub const RegistryError = error{
     UnsortedBuckets,
     /// Histogram bucket boundary is NaN or Inf.
     NonFiniteBucket,
+    /// The registry's max_metrics cardinality cap has been reached (S-019).
+    CardinalityLimitExceeded,
 };
 
 /// Tuning knobs for Registry behavior.
@@ -78,6 +80,12 @@ pub const RegistryOptions = struct {
     /// by per-metric bucket-copy cost. Lower values distribute work
     /// across more workers at the cost of more per-task bookkeeping.
     snapshot_chunk_size: usize = 64,
+    /// Optional hard cap on the total number of registered metrics across
+    /// all types. Null (default) means unlimited. Metric names must always
+    /// be low-cardinality and developer-controlled — never derived from
+    /// untrusted input — but a cap converts an accidental cardinality
+    /// explosion (CWE-770 memory-exhaustion DoS) into a clean error.
+    max_metrics: ?usize = null,
 };
 
 /// An instance-based metrics registry.
@@ -199,6 +207,9 @@ pub const Registry = struct {
         defer self.rwlock.unlock();
 
         if (self.nameInUse(name)) return error.AlreadyRegistered;
+        if (self.options.max_metrics) |cap| {
+            if (self.countLocked() >= cap) return error.CardinalityLimitExceeded;
+        }
 
         // S-017: copy name/help into registry-owned memory so the hashmap
         // key and the metric's strings cannot dangle if the caller frees
@@ -225,6 +236,9 @@ pub const Registry = struct {
         defer self.rwlock.unlock();
 
         if (self.nameInUse(name)) return error.AlreadyRegistered;
+        if (self.options.max_metrics) |cap| {
+            if (self.countLocked() >= cap) return error.CardinalityLimitExceeded;
+        }
 
         // S-017: copy name/help into registry-owned memory so the hashmap
         // key and the metric's strings cannot dangle if the caller frees
@@ -255,6 +269,9 @@ pub const Registry = struct {
         defer self.rwlock.unlock();
 
         if (self.nameInUse(name)) return error.AlreadyRegistered;
+        if (self.options.max_metrics) |cap| {
+            if (self.countLocked() >= cap) return error.CardinalityLimitExceeded;
+        }
 
         // S-017: copy name/help into registry-owned memory so the hashmap
         // key and the metric's strings cannot dangle if the caller frees
@@ -293,6 +310,9 @@ pub const Registry = struct {
         defer self.rwlock.unlock();
 
         if (self.nameInUse(name)) return error.AlreadyRegistered;
+        if (self.options.max_metrics) |cap| {
+            if (self.countLocked() >= cap) return error.CardinalityLimitExceeded;
+        }
 
         // S-017: copy name/help into registry-owned memory so the hashmap
         // key and the metric's strings cannot dangle if the caller frees
@@ -712,12 +732,17 @@ pub const Registry = struct {
         }
     }
 
+    /// Total metric count. Caller must hold the lock.
+    fn countLocked(self: *const Registry) usize {
+        return self.counters.count() + self.gauges.count() +
+            self.histograms.count() + self.timers.count();
+    }
+
     /// Return the total number of registered metrics across all types.
     pub fn metricCount(self: *Registry) usize {
         self.rwlock.lockShared();
         defer self.rwlock.unlockShared();
-        return self.counters.count() + self.gauges.count() +
-            self.histograms.count() + self.timers.count();
+        return self.countLocked();
     }
 };
 
@@ -900,4 +925,25 @@ test "Registry: different names across types succeed" {
     _ = try reg.timer("timer_metric", "help", &buckets);
 
     try std.testing.expectEqual(@as(usize, 4), reg.metricCount());
+}
+
+test "Registry: max_metrics cap rejects registration beyond limit (S-019)" {
+    var reg = Registry.initWithOptions(std.testing.allocator, .{ .max_metrics = 3 });
+    defer reg.deinit();
+
+    _ = try reg.counter("c1", "help");
+    _ = try reg.counter("c2", "help");
+    _ = try reg.gauge("g1", "help");
+    try std.testing.expectError(error.CardinalityLimitExceeded, reg.counter("c4", "help"));
+    const buckets = [_]f64{1.0};
+    try std.testing.expectError(error.CardinalityLimitExceeded, reg.histogram("h1", "help", &buckets));
+    try std.testing.expectEqual(@as(usize, 3), reg.metricCount());
+}
+
+test "Registry: default has no cardinality cap" {
+    var reg = Registry.init(std.testing.allocator);
+    defer reg.deinit();
+    _ = try reg.counter("c1", "help");
+    _ = try reg.counter("c2", "help");
+    try std.testing.expectEqual(@as(usize, 2), reg.metricCount());
 }
