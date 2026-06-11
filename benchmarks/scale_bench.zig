@@ -23,11 +23,6 @@ const tp = @import("thread_pool");
 // 0.16.0 shims
 // ---------------------------------------------------------------------------
 
-fn nanoTimestampCompat() i96 {
-    const io_inst = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toNanoseconds();
-}
-
 fn secondsSinceEpoch() u64 {
     const io_inst = std.Io.Threaded.global_single_threaded.io();
     const ts = std.Io.Clock.Timestamp.now(io_inst, .real);
@@ -189,7 +184,7 @@ fn runTier(allocator: std.mem.Allocator, tier: Tier, stderr: anytype) !TierResul
     defer arena.deinit();
     const a = arena.allocator();
 
-    const tier_start = nanoTimestampCompat();
+    const tier_start = metrics.compat.nanoTimestampMonotonic();
     var result = TierResult{
         .name = tier.name,
         .metric_count = tier.metric_count,
@@ -259,7 +254,7 @@ fn runTier(allocator: std.mem.Allocator, tier: Tier, stderr: anytype) !TierResul
 }
 
 fn timedOut(tier_start: i96) bool {
-    const elapsed: u64 = @intCast(@max(0, nanoTimestampCompat() - tier_start));
+    const elapsed: u64 = @intCast(@max(0, metrics.compat.nanoTimestampMonotonic() - tier_start));
     return elapsed > TIER_TIMEOUT_NS;
 }
 
@@ -285,14 +280,14 @@ fn benchRegistration(
     defer reg.deinit();
 
     const total = counter_names.len + gauge_names.len + hist_names.len + timer_names.len;
-    const start = nanoTimestampCompat();
+    const start = metrics.compat.nanoTimestampMonotonic();
 
     for (counter_names) |name| _ = try reg.counter(name, "bench");
     for (gauge_names) |name| _ = try reg.gauge(name, "bench");
     for (hist_names) |name| _ = try reg.histogram(name, "bench", &DEFAULT_BUCKETS);
     for (timer_names) |name| _ = try reg.timer(name, "bench", &DEFAULT_BUCKETS);
 
-    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, metrics.compat.nanoTimestampMonotonic() - start));
     return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(total));
 }
 
@@ -323,10 +318,10 @@ fn benchCounter(allocator: std.mem.Allocator, tier: Tier) !f64 {
     }
 
     var wg = pool.waitGroup();
-    const start = nanoTimestampCompat();
+    const start = metrics.compat.nanoTimestampMonotonic();
     _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
     wg.wait();
-    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, metrics.compat.nanoTimestampMonotonic() - start));
 
     const total_ops = tier.thread_count * tier.iterations;
     return opsPerSec(total_ops, elapsed_ns);
@@ -355,10 +350,10 @@ fn benchGauge(allocator: std.mem.Allocator, tier: Tier) !f64 {
     }
 
     var wg = pool.waitGroup();
-    const start = nanoTimestampCompat();
+    const start = metrics.compat.nanoTimestampMonotonic();
     _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
     wg.wait();
-    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, metrics.compat.nanoTimestampMonotonic() - start));
 
     return opsPerSec(tier.thread_count * tier.iterations, elapsed_ns);
 }
@@ -388,10 +383,10 @@ fn benchHistogram(allocator: std.mem.Allocator, tier: Tier) !f64 {
     }
 
     var wg = pool.waitGroup();
-    const start = nanoTimestampCompat();
+    const start = metrics.compat.nanoTimestampMonotonic();
     _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
     wg.wait();
-    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, metrics.compat.nanoTimestampMonotonic() - start));
 
     return opsPerSec(tier.thread_count * tier.iterations, elapsed_ns);
 }
@@ -421,10 +416,10 @@ fn benchTimer(allocator: std.mem.Allocator, tier: Tier) !f64 {
     }
 
     var wg = pool.waitGroup();
-    const start = nanoTimestampCompat();
+    const start = metrics.compat.nanoTimestampMonotonic();
     _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
     wg.wait();
-    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, metrics.compat.nanoTimestampMonotonic() - start));
 
     return opsPerSec(tier.thread_count * tier.iterations, elapsed_ns);
 }
@@ -446,12 +441,12 @@ fn benchSnapshot(
         snap.deinit();
     }
 
-    const start = nanoTimestampCompat();
+    const start = metrics.compat.nanoTimestampMonotonic();
     for (0..SNAPSHOT_SAMPLES) |_| {
         var snap = try reg.snapshot();
         snap.deinit();
     }
-    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, metrics.compat.nanoTimestampMonotonic() - start));
     _ = tier;
 
     return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(SNAPSHOT_SAMPLES)) / 1_000_000.0;
@@ -478,12 +473,12 @@ fn benchParallelSnapshot(
         snap.deinit();
     }
 
-    const start = nanoTimestampCompat();
+    const start = metrics.compat.nanoTimestampMonotonic();
     for (0..SNAPSHOT_SAMPLES) |_| {
         var snap = try reg.parallelSnapshot(&pool);
         snap.deinit();
     }
-    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, metrics.compat.nanoTimestampMonotonic() - start));
 
     return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(SNAPSHOT_SAMPLES)) / 1_000_000.0;
 }
@@ -510,12 +505,12 @@ fn benchPrometheus(
         try metrics.writePrometheus(&reg, &writer);
     }
 
-    const start = nanoTimestampCompat();
+    const start = metrics.compat.nanoTimestampMonotonic();
     for (0..PROMETHEUS_SAMPLES) |_| {
         var writer: std.Io.Writer = .fixed(buf);
         try metrics.writePrometheus(&reg, &writer);
     }
-    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, metrics.compat.nanoTimestampMonotonic() - start));
 
     return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(PROMETHEUS_SAMPLES)) / 1_000_000.0;
 }
@@ -588,10 +583,10 @@ fn benchMixed(
     }
 
     var wg = pool.waitGroup();
-    const start = nanoTimestampCompat();
+    const start = metrics.compat.nanoTimestampMonotonic();
     _ = try pool.submitBatch(tasks, .{ .wait_group = &wg });
     wg.wait();
-    const elapsed_ns: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
+    const elapsed_ns: u64 = @intCast(@max(0, metrics.compat.nanoTimestampMonotonic() - start));
 
     return opsPerSec(tier.thread_count * tier.iterations, elapsed_ns);
 }

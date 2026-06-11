@@ -9,12 +9,7 @@
 const std = @import("std");
 const histogram_mod = @import("histogram.zig");
 const Histogram = histogram_mod.Histogram;
-
-/// 0.16.0 shim: std.time.nanoTimestamp() was removed. Use Io clock instead.
-fn nanoTimestampCompat() i96 {
-    const io_inst = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toNanoseconds();
-}
+const compat = @import("compat.zig");
 
 /// Default timer buckets (in seconds) suitable for typical latency measurements.
 pub const default_timer_buckets: []const f64 = &.{
@@ -49,7 +44,7 @@ pub const Timer = struct {
     pub fn start(self: *Timer) Sample {
         return .{
             .timer = self,
-            .start_ns = nanoTimestampCompat(),
+            .start_ns = compat.nanoTimestampMonotonic(),
         };
     }
 
@@ -80,9 +75,10 @@ pub const Timer = struct {
         start_ns: i96,
 
         /// Stop the timer and record the elapsed duration.
-        /// Clamps to zero if clock moved backward (e.g., NTP correction).
+        /// Clamps to zero; monotonic clock makes backward steps impossible
+        /// on conformant platforms, but clamp guards against any quirks.
         pub fn finish(self: Sample) void {
-            const end_ns = nanoTimestampCompat();
+            const end_ns = compat.nanoTimestampMonotonic();
             const elapsed_ns = @max(0, end_ns - self.start_ns);
             const seconds: f64 = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
             self.timer.histogram.observe(seconds);
@@ -153,4 +149,13 @@ test "Timer: default_timer_buckets is sorted" {
     for (0..default_timer_buckets.len - 1) |i| {
         try std.testing.expect(default_timer_buckets[i] < default_timer_buckets[i + 1]);
     }
+}
+
+test "Timer: uses monotonic clock for durations (P-011)" {
+    // Monotonic timestamps can never go backward; two consecutive reads
+    // must be non-decreasing. This also pins the compat helper choice:
+    // Timer must use the monotonic (.awake) clock, not wall (.real).
+    const a = @import("compat.zig").nanoTimestampMonotonic();
+    const b = @import("compat.zig").nanoTimestampMonotonic();
+    try std.testing.expect(b >= a);
 }

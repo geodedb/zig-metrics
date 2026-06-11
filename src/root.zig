@@ -70,6 +70,9 @@ pub const RegistryOptions = @import("registry.zig").RegistryOptions;
 /// Thread pool structured concurrency (re-exported for consumers).
 pub const thread_pool = @import("thread_pool");
 
+/// Zig 0.16 timestamp compatibility helpers (wall + monotonic clocks).
+pub const compat = @import("compat.zig");
+
 /// Prometheus text format exporter.
 pub const prometheus = @import("prometheus.zig");
 
@@ -107,6 +110,7 @@ test {
     std.testing.refAllDecls(@This());
 
     // Pull in all submodule tests
+    _ = @import("compat.zig");
     _ = @import("counter.zig");
     _ = @import("gauge.zig");
     _ = @import("histogram.zig");

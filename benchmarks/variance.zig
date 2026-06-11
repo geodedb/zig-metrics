@@ -18,12 +18,6 @@ const BENCH_ITERATIONS: u64 = 100_000;
 const THREAD_COUNT: usize = 4;
 const SAMPLE_RUNS: usize = 10;
 
-/// 0.16.0 shim: std.time.nanoTimestamp() was removed.
-fn nanoTimestampCompat() i96 {
-    const io_inst = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toNanoseconds();
-}
-
 pub fn main() !void {
     const io_inst = std.Io.Threaded.global_single_threaded.io();
     var stdout_buf: [8192]u8 = undefined;
@@ -89,10 +83,10 @@ fn benchmarkCounter(allocator: std.mem.Allocator, pool: *tp.ThreadPool, w: *std.
         }
 
         var wg = pool.waitGroup();
-        const start = nanoTimestampCompat();
+        const start = metrics.compat.nanoTimestampMonotonic();
         _ = try pool.submitBatch(&tasks, .{ .wait_group = &wg });
         wg.wait();
-        const elapsed: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
+        const elapsed: u64 = @intCast(@max(0, metrics.compat.nanoTimestampMonotonic() - start));
         sample.* = elapsed;
 
         const expected = BENCH_ITERATIONS * THREAD_COUNT;
@@ -134,10 +128,10 @@ fn benchmarkHistogram(allocator: std.mem.Allocator, pool: *tp.ThreadPool, w: *st
         }
 
         var wg = pool.waitGroup();
-        const start = nanoTimestampCompat();
+        const start = metrics.compat.nanoTimestampMonotonic();
         _ = try pool.submitBatch(&tasks, .{ .wait_group = &wg });
         wg.wait();
-        const elapsed: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
+        const elapsed: u64 = @intCast(@max(0, metrics.compat.nanoTimestampMonotonic() - start));
         sample.* = elapsed;
 
         const expected = BENCH_ITERATIONS * THREAD_COUNT;
@@ -188,10 +182,10 @@ fn benchmarkMixed(allocator: std.mem.Allocator, pool: *tp.ThreadPool, w: *std.Io
         }
 
         var wg = pool.waitGroup();
-        const start = nanoTimestampCompat();
+        const start = metrics.compat.nanoTimestampMonotonic();
         _ = try pool.submitBatch(&tasks, .{ .wait_group = &wg });
         wg.wait();
-        const elapsed: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
+        const elapsed: u64 = @intCast(@max(0, metrics.compat.nanoTimestampMonotonic() - start));
         sample.* = elapsed;
     }
 
@@ -217,12 +211,12 @@ fn benchmarkParallelSnapshot(allocator: std.mem.Allocator, pool: *tp.ThreadPool,
         for (hist_names) |name| _ = try reg.histogram(name, "bench hist", &buckets);
         for (timer_names) |name| _ = try reg.timer(name, "bench timer", &buckets);
 
-        const start = nanoTimestampCompat();
+        const start = metrics.compat.nanoTimestampMonotonic();
 
         var snap = try reg.parallelSnapshot(pool);
         snap.deinit();
 
-        const elapsed: u64 = @intCast(@max(0, nanoTimestampCompat() - start));
+        const elapsed: u64 = @intCast(@max(0, metrics.compat.nanoTimestampMonotonic() - start));
         sample.* = elapsed;
     }
 

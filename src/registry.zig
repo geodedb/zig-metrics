@@ -39,11 +39,7 @@ const RwLockShim = struct {
         self.inner.unlock(getIo());
     }
 };
-/// 0.16.0 shim: std.time.nanoTimestamp() was removed. Use Io clock instead.
-fn nanoTimestampCompat() i96 {
-    const io_inst = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toNanoseconds();
-}
+const compat = @import("compat.zig");
 
 const Counter = @import("counter.zig").Counter;
 const Gauge = @import("gauge.zig").Gauge;
@@ -642,7 +638,7 @@ pub const Registry = struct {
             .bucket_count_storage = bucket_count_storage,
             .bucket_bound_storage = bucket_bound_storage,
             .allocator = self.allocator,
-            .timestamp_ns = nanoTimestampCompat(),
+            .timestamp_ns = compat.nanoTimestampWall(),
         };
     }
 
