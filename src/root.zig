@@ -119,3 +119,16 @@ test {
     _ = @import("registry.zig");
     _ = @import("prometheus.zig");
 }
+
+test "metrics has no fips-relevant crypto sites (docs/FIPS.md declares no-crypto status)" {
+    // metrics performs no crypto/hash/RNG; this test pins the invariant so a
+    // future addition forces re-evaluation of docs/FIPS.md.
+    // The search needles are assembled from fragments so the literal patterns
+    // do not appear verbatim in this source file (which would make the embedded
+    // copy match itself and defeat the guard).
+    const root = @embedFile("root.zig");
+    const crypto_needle = "std." ++ "crypto";
+    const random_needle = "std." ++ "Random";
+    try std.testing.expect(std.mem.indexOf(u8, root, crypto_needle) == null);
+    try std.testing.expect(std.mem.indexOf(u8, root, random_needle) == null);
+}
